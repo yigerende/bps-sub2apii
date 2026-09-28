@@ -1,6 +1,6 @@
-# Sub2API Deployment Files
+# bps-sub2api Deployment Files
 
-This directory contains files for deploying Sub2API on Linux servers and Apple-silicon Macs.
+This directory contains files for deploying bps-sub2api on Linux servers and Apple-silicon Macs.
 
 ## Deployment Methods
 
@@ -23,8 +23,8 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 | `DOCKER.md` | Docker Hub documentation |
 | `install.sh` | One-click binary installation script |
 | `install-datamanagementd.sh` | datamanagementd 一键安装脚本 |
-| `sub2api.service` | Systemd service unit file |
-| `sub2api-datamanagementd.service` | datamanagementd systemd service unit file |
+| `bps-sub2api.service` | Systemd service unit file |
+| `bps-sub2api-datamanagementd.service` | datamanagementd systemd service unit file |
 | `DATAMANAGEMENTD_CN.md` | datamanagementd 部署与联动说明（中文） |
 | `config.example.yaml` | Example configuration file |
 | `install-mihomo-codex.sh` | Optional Mihomo sidecar for rotating Codex ticket harvest exits |
@@ -36,7 +36,7 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 
 ## Apple container Deployment
 
-Apple-silicon Macs running macOS 26 can run the complete Sub2API, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
+Apple-silicon Macs running macOS 26 can run the complete bps-sub2api, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
 
 ```bash
 ./apple-container.sh init
@@ -45,7 +45,7 @@ Apple-silicon Macs running macOS 26 can run the complete Sub2API, PostgreSQL, an
 ./apple-container.sh logs app -f
 ```
 
-The script uses Apple named volumes, starts dependencies in order, and performs live readiness checks. The application container supervises the Sub2API process so the Web UI's update-and-restart flow can relaunch an updated binary. It does not provide host-level automatic startup; run `./apple-container.sh up` after a host reboot. Docker Compose remains the recommended production deployment path.
+The script uses Apple named volumes, starts dependencies in order, and performs live readiness checks. The application container supervises the bps-sub2api process so the Web UI's update-and-restart flow can relaunch an updated binary. It does not provide host-level automatic startup; run `./apple-container.sh up` after a host reboot. Docker Compose remains the recommended production deployment path.
 
 See [APPLE_CONTAINER.md](./APPLE_CONTAINER.md) for configuration, upgrades, persistence, networking behavior, and limitations.
 
@@ -59,10 +59,10 @@ Use the automated preparation script for the easiest setup:
 
 ```bash
 # Download and run the preparation script
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/docker-deploy.sh | bash
 
 # Or download first, then run
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/docker-deploy.sh -o docker-deploy.sh
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/docker-deploy.sh -o docker-deploy.sh
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
@@ -71,7 +71,7 @@ chmod +x docker-deploy.sh
 - Downloads `docker-compose.local.yml` and `.env.example`
 - Automatically generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
 - Creates `.env` file with generated secrets
-- Creates necessary data directories (data/, postgres_data/, redis_data/)
+- Creates necessary data directories (data/, bps-sub2api-postgres-data/, bps-sub2api-redis-data/)
 - **Displays generated credentials** (POSTGRES_PASSWORD, JWT_SECRET, etc.)
 
 **After running the script:**
@@ -80,13 +80,13 @@ chmod +x docker-deploy.sh
 docker compose -f docker-compose.local.yml up -d
 
 # View logs
-docker compose -f docker-compose.local.yml logs -f sub2api
+docker compose -f docker-compose.local.yml logs -f bps-sub2api
 
 # If admin password was auto-generated, find it in logs:
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
+docker compose -f docker-compose.local.yml logs bps-sub2api | grep "admin password"
 
 # Access Web UI
-# http://localhost:8080
+# http://localhost:8082
 ```
 
 ### Method 2: Manual Deployment
@@ -95,8 +95,8 @@ If you prefer manual control:
 
 ```bash
 # Clone repository
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api/deploy
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api/deploy
 
 # Configure environment
 cp .env.example .env
@@ -110,23 +110,23 @@ echo "JWT_SECRET=${JWT_SECRET}" >> .env
 echo "TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}" >> .env
 
 # Create data directories
-mkdir -p data postgres_data redis_data
+mkdir -p bps-sub2api-data bps-sub2api-postgres-data bps-sub2api-redis-data
 
 # Start all services using local directory version
 docker compose -f docker-compose.local.yml up -d
 
 # View logs (check for auto-generated admin password)
-docker compose -f docker-compose.local.yml logs -f sub2api
+docker compose -f docker-compose.local.yml logs -f bps-sub2api
 
 # Access Web UI
-# http://localhost:8080
+# http://localhost:8082
 ```
 
 ### Deployment Version Comparison
 
 | Version | Data Storage | Migration | Best For |
 |---------|-------------|-----------|----------|
-| **docker-compose.local.yml** | Local directories (./data, ./postgres_data, ./redis_data) | ✅ Easy (tar entire directory) | Production, need frequent backups/migration |
+| **docker-compose.local.yml** | Local directories (./bps-sub2api-data, ./bps-sub2api-postgres-data, ./bps-sub2api-redis-data) | ✅ Easy (tar entire directory) | Production, need frequent backups/migration |
 | **docker-compose.yml** | Named volumes (/var/lib/docker/volumes/) | ⚠️ Requires docker commands | Simple setup, don't need migration |
 
 **Recommendation:** Use `docker-compose.local.yml` (deployed by `docker-deploy.sh`) for easier data management and migration.
@@ -146,12 +146,12 @@ When using Docker Compose with `AUTO_SETUP=true`:
 
 3. If `ADMIN_PASSWORD` is not set, check logs for the generated password:
    ```bash
-   docker compose logs sub2api | grep "admin password"
+   docker compose logs bps-sub2api | grep "admin password"
    ```
 
 ### Startup and Database Recovery
 
-Sub2API applies database migrations during application startup. PostgreSQL can
+bps-sub2api applies database migrations during application startup. PostgreSQL can
 remain in its recovery/startup phase briefly after a host or Docker daemon
 restart. The application retries transient PostgreSQL startup and connection
 errors with bounded exponential backoff, then starts automatically when the
@@ -165,9 +165,9 @@ replacement for application-level retries when Docker restores existing
 containers after a host restart.
 
 For systemd deployments, keep `Restart=always` and `RestartSec` configured in
-`sub2api.service`; the application retry covers transient database startup,
+`bps-sub2api.service`; the application retry covers transient database startup,
 while systemd remains the supervisor for permanent process exits. For
-Kubernetes, use a PostgreSQL readiness probe and retain the Sub2API startup
+Kubernetes, use a PostgreSQL readiness probe and retain the bps-sub2api startup
 retry behavior; configure the application liveness probe separately so a
 database recovery period is not treated as a permanent process failure.
 
@@ -199,7 +199,7 @@ SELECT
 
 如需启用管理后台“数据管理”功能，请额外部署宿主机 `datamanagementd`：
 
-- 主进程固定探测 `/tmp/sub2api-datamanagement.sock`
+- 主进程固定探测 `/tmp/bps-sub2api-datamanagement.sock`
 - Docker 场景下需把宿主机 Socket 挂载到容器内同路径
 - 详细步骤见：`deploy/DATAMANAGEMENTD_CN.md`
 
@@ -215,10 +215,10 @@ docker compose -f docker-compose.local.yml up -d
 docker compose -f docker-compose.local.yml down
 
 # View logs
-docker compose -f docker-compose.local.yml logs -f sub2api
+docker compose -f docker-compose.local.yml logs -f bps-sub2api
 
-# Restart Sub2API only
-docker compose -f docker-compose.local.yml restart sub2api
+# Restart bps-sub2api only
+docker compose -f docker-compose.local.yml restart bps-sub2api
 
 # Update to latest version
 docker compose -f docker-compose.local.yml pull
@@ -226,7 +226,7 @@ docker compose -f docker-compose.local.yml up -d
 
 # Remove all data (caution!)
 docker compose -f docker-compose.local.yml down
-rm -rf data/ postgres_data/ redis_data/
+rm -rf data/ bps-sub2api-postgres-data/ bps-sub2api-redis-data/
 ```
 
 For **named volumes version** (docker-compose.yml):
@@ -239,10 +239,10 @@ docker compose up -d
 docker compose down
 
 # View logs
-docker compose logs -f sub2api
+docker compose logs -f bps-sub2api
 
-# Restart Sub2API only
-docker compose restart sub2api
+# Restart bps-sub2api only
+docker compose restart bps-sub2api
 
 # Update to latest version
 docker compose pull
@@ -259,8 +259,8 @@ docker compose down -v
 | `POSTGRES_PASSWORD` | **Yes** | - | PostgreSQL password |
 | `JWT_SECRET` | **Recommended** | *(auto-generated)* | JWT secret (fixed for persistent sessions) |
 | `TOTP_ENCRYPTION_KEY` | **Recommended** | *(auto-generated)* | TOTP encryption key (fixed for persistent 2FA) |
-| `SERVER_PORT` | No | `8080` | Server port |
-| `ADMIN_EMAIL` | No | `admin@sub2api.local` | Admin email |
+| `SERVER_PORT` | No | `8082` | Server port |
+| `ADMIN_EMAIL` | No | `admin@bps-sub2api.local` | Admin email |
 | `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
 | `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
@@ -282,13 +282,13 @@ When using `docker-compose.local.yml`, all data is stored in local directories, 
 cd /path/to/deployment
 docker compose -f docker-compose.local.yml down
 cd ..
-tar czf sub2api-complete.tar.gz deployment/
+tar czf bps-sub2api-complete.tar.gz deployment/
 
 # Transfer to new server
-scp sub2api-complete.tar.gz user@new-server:/path/to/destination/
+scp bps-sub2api-complete.tar.gz user@new-server:/path/to/destination/
 
 # On new server: Extract and start
-tar xzf sub2api-complete.tar.gz
+tar xzf bps-sub2api-complete.tar.gz
 cd deployment/
 docker compose -f docker-compose.local.yml up -d
 ```
@@ -299,7 +299,7 @@ Your entire deployment (configuration + data) is migrated!
 
 ## Gemini OAuth Configuration
 
-Sub2API supports three methods to connect to Gemini:
+bps-sub2api supports three methods to connect to Gemini:
 
 ### Method 1: Code Assist OAuth (Recommended for GCP Users)
 
@@ -344,7 +344,7 @@ Requires your own OAuth client credentials.
    - Go to "APIs & Services" → "Credentials"
    - Click "Create Credentials" → "OAuth client ID"
    - Application type: **Web application** (or **Desktop app**)
-   - Name: e.g., "Sub2API Gemini"
+   - Name: e.g., "bps-sub2api Gemini"
    - Authorized redirect URIs: Add `http://localhost:1455/auth/callback`
 6. Copy the **Client ID** and **Client Secret**
 7. **⚠️ Publish to Production (IMPORTANT):**
@@ -401,19 +401,19 @@ For production servers using systemd.
 ### One-Line Installation
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/install.sh | sudo bash
 ```
 
 ### Manual Installation
 
-1. Download the latest release from [GitHub Releases](https://github.com/ranxi2001/sub2api/releases)
-2. Extract and copy the binary to `/opt/sub2api/`
-3. Copy `sub2api.service` to `/etc/systemd/system/`
+1. Download the latest release from [GitHub Releases](https://github.com/yigerende/bps-sub2apii/releases)
+2. Extract and copy the binary to `/opt/bps-sub2api/`
+3. Copy `bps-sub2api.service` to `/etc/systemd/system/`
 4. Run:
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl enable sub2api
-   sudo systemctl start sub2api
+   sudo systemctl enable bps-sub2api
+   sudo systemctl start bps-sub2api
    ```
 5. Open the Setup Wizard in your browser to complete configuration
 
@@ -434,22 +434,22 @@ sudo ./install.sh uninstall
 
 ```bash
 # Start the service
-sudo systemctl start sub2api
+sudo systemctl start bps-sub2api
 
 # Stop the service
-sudo systemctl stop sub2api
+sudo systemctl stop bps-sub2api
 
 # Restart the service
-sudo systemctl restart sub2api
+sudo systemctl restart bps-sub2api
 
 # Check status
-sudo systemctl status sub2api
+sudo systemctl status bps-sub2api
 
 # View logs
-sudo journalctl -u sub2api -f
+sudo journalctl -u bps-sub2api -f
 
 # Enable auto-start on boot
-sudo systemctl enable sub2api
+sudo systemctl enable bps-sub2api
 ```
 
 ### Codex 292 ticket proxy
@@ -457,7 +457,7 @@ sudo systemctl enable sub2api
 The Codex ticket harvester can use a local Mihomo sidecar backed by an airport
 subscription. This keeps subscription credentials outside the application
 database and limits the proxy listener to localhost. Run the optional installer
-as root on the same server as Sub2API:
+as root on the same server as bps-sub2api:
 
 ```bash
 sudo MIHOMO_CODEX_SUBSCRIPTION_URL='https://provider.example/subscription' \
@@ -496,7 +496,7 @@ To change after installation:
 
 1. Edit the systemd service:
    ```bash
-   sudo systemctl edit sub2api
+   sudo systemctl edit bps-sub2api
    ```
 
 2. Add or modify:
@@ -509,7 +509,7 @@ To change after installation:
 3. Reload and restart:
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl restart sub2api
+   sudo systemctl restart bps-sub2api
    ```
 
 #### Gemini OAuth Configuration
@@ -518,7 +518,7 @@ If you need to use AI Studio OAuth for Gemini accounts, add the OAuth client cre
 
 1. Edit the service file:
    ```bash
-   sudo nano /etc/systemd/system/sub2api.service
+   sudo nano /etc/systemd/system/bps-sub2api.service
    ```
 
 2. Add your OAuth credentials in the `[Service]` section (after the existing `Environment=` lines):
@@ -535,7 +535,7 @@ If you need to use AI Studio OAuth for Gemini accounts, add the OAuth client cre
 3. Reload and restart:
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl restart sub2api
+   sudo systemctl restart bps-sub2api
    ```
 
 > **Note:** Code Assist OAuth does not require any configuration - it uses the built-in Gemini CLI client.
@@ -543,7 +543,7 @@ If you need to use AI Studio OAuth for Gemini accounts, add the OAuth client cre
 
 #### Application Configuration
 
-The main config file is at `/etc/sub2api/config.yaml` (created by Setup Wizard).
+The main config file is at `/etc/bps-sub2api/config.yaml` (created by Setup Wizard).
 
 ### Prerequisites
 
@@ -555,12 +555,12 @@ The main config file is at `/etc/sub2api/config.yaml` (created by Setup Wizard).
 ### Directory Structure
 
 ```
-/opt/sub2api/
-├── sub2api              # Main binary
-├── sub2api.backup       # Backup (after upgrade)
+/opt/bps-sub2api/
+├── bps-sub2api              # Main binary
+├── bps-sub2api.backup       # Backup (after upgrade)
 └── data/                # Runtime data
 
-/etc/sub2api/
+/etc/bps-sub2api/
 └── config.yaml          # Configuration file
 ```
 
@@ -577,19 +577,19 @@ For **local directory version**:
 docker compose -f docker-compose.local.yml ps
 
 # View detailed logs
-docker compose -f docker-compose.local.yml logs --tail=100 sub2api
+docker compose -f docker-compose.local.yml logs --tail=100 bps-sub2api
 
 # Check database connection
-docker compose -f docker-compose.local.yml exec postgres pg_isready
+docker compose -f docker-compose.local.yml exec bps-sub2api-postgres pg_isready
 
 # Check Redis connection
-docker compose -f docker-compose.local.yml exec redis redis-cli ping
+docker compose -f docker-compose.local.yml exec bps-sub2api-redis redis-cli ping
 
 # Restart all services
 docker compose -f docker-compose.local.yml restart
 
 # Check data directories
-ls -la data/ postgres_data/ redis_data/
+ls -la data/ bps-sub2api-postgres-data/ bps-sub2api-redis-data/
 ```
 
 For **named volumes version**:
@@ -599,13 +599,13 @@ For **named volumes version**:
 docker compose ps
 
 # View detailed logs
-docker compose logs --tail=100 sub2api
+docker compose logs --tail=100 bps-sub2api
 
 # Check database connection
-docker compose exec postgres pg_isready
+docker compose exec bps-sub2api-postgres pg_isready
 
 # Check Redis connection
-docker compose exec redis redis-cli ping
+docker compose exec bps-sub2api-redis redis-cli ping
 
 # Restart all services
 docker compose restart
@@ -615,13 +615,13 @@ docker compose restart
 
 ```bash
 # Check service status
-sudo systemctl status sub2api
+sudo systemctl status bps-sub2api
 
 # View recent logs
-sudo journalctl -u sub2api -n 50
+sudo journalctl -u bps-sub2api -n 50
 
 # Check config file
-sudo cat /etc/sub2api/config.yaml
+sudo cat /etc/bps-sub2api/config.yaml
 
 # Check PostgreSQL
 sudo systemctl status postgresql
@@ -641,9 +641,9 @@ sudo systemctl status redis
 
 ## TLS Fingerprint Configuration
 
-Sub2API supports TLS fingerprint simulation to make requests appear as if they come from the official Claude CLI (Node.js client).
+bps-sub2api supports TLS fingerprint simulation to make requests appear as if they come from the official Claude CLI (Node.js client).
 
-> **💡 Tip:** Visit **[tls.sub2api.org](https://tls.sub2api.org/)** to get TLS fingerprint information for different devices and browsers.
+> **💡 Tip:** Visit **[tls.bps-sub2api.org](https://tls.bps-sub2api.org/)** to get TLS fingerprint information for different devices and browsers.
 
 ### Default Behavior
 

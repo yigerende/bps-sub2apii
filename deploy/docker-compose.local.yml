@@ -1,5 +1,5 @@
 # =============================================================================
-# Sub2API Docker Compose - Local Directory Version
+# bps-sub2api Docker Compose - Local Directory Version
 # =============================================================================
 # This configuration uses local directories for data storage instead of named
 # volumes, making it easy to migrate the entire deployment by simply copying
@@ -7,25 +7,27 @@
 #
 # Quick Start:
 #   1. Copy .env.example to .env and configure
-#   2. mkdir -p data postgres_data redis_data
+#   2. mkdir -p data bps-sub2api-postgres-data bps-sub2api-redis-data
 #   3. docker-compose -f docker-compose.local.yml up -d
-#   4. Check logs: docker-compose -f docker-compose.local.yml logs -f sub2api
-#   5. Access: http://localhost:8080
+#   4. Check logs: docker-compose -f docker-compose.local.yml logs -f bps-sub2api
+#   5. Access: http://localhost:8082
 #
 # Migration to New Server:
 #   1. docker-compose -f docker-compose.local.yml down
-#   2. tar czf sub2api-deploy.tar.gz deploy/
+#   2. tar czf bps-sub2api-deploy.tar.gz deploy/
 #   3. Transfer to new server and extract
 #   4. docker-compose -f docker-compose.local.yml up -d
 # =============================================================================
 
+name: bps-sub2api
+
 services:
   # ===========================================================================
-  # Sub2API Application
+  # bps-sub2api Application
   # ===========================================================================
-  sub2api:
-    image: ghcr.io/ranxi2001/sub2api:latest
-    container_name: sub2api
+  bps-sub2api:
+    image: ghcr.io/yigerende/bps-sub2api:latest
+    container_name: bps-sub2api
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -34,10 +36,10 @@ services:
         soft: 100000
         hard: 100000
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
+      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8082}:8080"
     volumes:
       # Local directory mapping for easy migration
-      - ./data:/app/data:Z
+      - ./bps-sub2api-data:/app/data:Z
       # Optional: Mount custom config.yaml (uncomment and create the file first)
       # Copy config.example.yaml to config.yaml, modify it, then uncomment:
       # - ./config.yaml:/app/data/config.yaml
@@ -52,6 +54,8 @@ services:
       # =======================================================================
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
+      - LOG_SERVICE_NAME=${LOG_SERVICE_NAME:-bps-sub2api}
+      - LOG_OUTPUT_FILE_PATH=${LOG_OUTPUT_FILE_PATH:-/app/data/logs/bps-sub2api.log}
       - SERVER_MODE=${SERVER_MODE:-release}
       - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
       - RUN_MODE=${RUN_MODE:-standard}
@@ -62,11 +66,11 @@ services:
       # =======================================================================
       # Database Configuration (PostgreSQL)
       # =======================================================================
-      - DATABASE_HOST=postgres
+      - DATABASE_HOST=bps-sub2api-postgres
       - DATABASE_PORT=5432
-      - DATABASE_USER=${POSTGRES_USER:-sub2api}
+      - DATABASE_USER=${POSTGRES_USER:-bps-sub2api}
       - DATABASE_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      - DATABASE_DBNAME=${POSTGRES_DB:-sub2api}
+      - DATABASE_DBNAME=${POSTGRES_DB:-bps-sub2api}
       - DATABASE_SSLMODE=disable
       - DATABASE_MAX_OPEN_CONNS=${DATABASE_MAX_OPEN_CONNS:-50}
       - DATABASE_MAX_IDLE_CONNS=${DATABASE_MAX_IDLE_CONNS:-10}
@@ -76,7 +80,7 @@ services:
       # =======================================================================
       # Redis Configuration
       # =======================================================================
-      - REDIS_HOST=redis
+      - REDIS_HOST=bps-sub2api-redis
       - REDIS_PORT=6379
       - REDIS_USERNAME=${REDIS_USERNAME:-}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
@@ -88,7 +92,7 @@ services:
       # =======================================================================
       # Admin Account (auto-created on first run)
       # =======================================================================
-      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@sub2api.local}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@bps-sub2api.local}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
 
       # =======================================================================
@@ -164,10 +168,10 @@ services:
       # Gateway Upstream, Scheduling & Image Configuration
       # =======================================================================
       # Gateway values come from Compose .env or the shell.
-      # Fallbacks mirror Sub2API backend defaults so omitted values preserve behavior.
+      # Fallbacks mirror bps-sub2api backend defaults so omitted values preserve behavior.
       - GATEWAY_FORCE_CODEX_CLI=${GATEWAY_FORCE_CODEX_CLI:-false}
       - GATEWAY_OPENAI_COMPACT_MODEL=${GATEWAY_OPENAI_COMPACT_MODEL:-gpt-5.5}
-      - SUB2API_IMAGES_MAIN_MODEL=${SUB2API_IMAGES_MAIN_MODEL:-gpt-5.6-luna}
+      - BPS_SUB2API_IMAGES_MAIN_MODEL=${BPS_SUB2API_IMAGES_MAIN_MODEL:-gpt-5.6-luna}
       - GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT=${GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT:-0}
       - GATEWAY_OPENAI_WS_FORCE_HTTP=${GATEWAY_OPENAI_WS_FORCE_HTTP:-false}
       - GATEWAY_OPENAI_HTTP2_ENABLED=${GATEWAY_OPENAI_HTTP2_ENABLED:-true}
@@ -206,12 +210,12 @@ services:
       - GATEWAY_IMAGE_CONCURRENCY_WAIT_TIMEOUT_SECONDS=${GATEWAY_IMAGE_CONCURRENCY_WAIT_TIMEOUT_SECONDS:-30}
       - GATEWAY_IMAGE_CONCURRENCY_MAX_WAITING_REQUESTS=${GATEWAY_IMAGE_CONCURRENCY_MAX_WAITING_REQUESTS:-100}
     depends_on:
-      postgres:
+      bps-sub2api-postgres:
         condition: service_healthy
-      redis:
+      bps-sub2api-redis:
         condition: service_healthy
     networks:
-      - sub2api-network
+      - bps-sub2api-network
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
       interval: 30s
@@ -222,9 +226,9 @@ services:
   # ===========================================================================
   # PostgreSQL Database
   # ===========================================================================
-  postgres:
+  bps-sub2api-postgres:
     image: postgres:18-alpine
-    container_name: sub2api-postgres
+    container_name: bps-sub2api-postgres
     restart: unless-stopped
     ulimits:
       nofile:
@@ -232,17 +236,17 @@ services:
         hard: 100000
     volumes:
       # Local directory mapping for easy migration
-      - ./postgres_data:/var/lib/postgresql/data:Z
+      - ./bps-sub2api-postgres-data:/var/lib/postgresql/data:Z
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-sub2api}
+      - POSTGRES_USER=${POSTGRES_USER:-bps-sub2api}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      - POSTGRES_DB=${POSTGRES_DB:-sub2api}
+      - POSTGRES_DB=${POSTGRES_DB:-bps-sub2api}
       - PGDATA=/var/lib/postgresql/data
       - TZ=${TZ:-Asia/Shanghai}
     networks:
-      - sub2api-network
+      - bps-sub2api-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bps-sub2api} -d ${POSTGRES_DB:-bps-sub2api}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -253,9 +257,9 @@ services:
   # ===========================================================================
   # Redis Cache
   # ===========================================================================
-  redis:
+  bps-sub2api-redis:
     image: redis:8-alpine
-    container_name: sub2api-redis
+    container_name: bps-sub2api-redis
     restart: unless-stopped
     ulimits:
       nofile:
@@ -263,7 +267,7 @@ services:
         hard: 100000
     volumes:
       # Local directory mapping for easy migration
-      - ./redis_data:/data:Z
+      - ./bps-sub2api-redis-data:/data:Z
     # The command is one quoted script for the inner `sh -c`. Compose keeps
     # the newlines inside the quoted string, so every line needs a trailing
     # `\` — without it, `redis-server` on the first line runs with no flags
@@ -280,7 +284,7 @@ services:
       # REDISCLI_AUTH is used by redis-cli for authentication (safer than -a flag)
       - REDISCLI_AUTH=${REDIS_PASSWORD:-}
     networks:
-      - sub2api-network
+      - bps-sub2api-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -292,5 +296,5 @@ services:
 # Networks
 # =============================================================================
 networks:
-  sub2api-network:
+  bps-sub2api-network:
     driver: bridge

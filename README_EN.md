@@ -1,8 +1,10 @@
+> **bps-sub2api 独立部署版**：基于 [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api)，应用、PostgreSQL、Redis、网络和持久化存储使用独立名称，默认宿主机端口 `8082`。部署及升级请先看 [BPS 部署说明](docs/BPS_DEPLOY.md)。本仓库地址为 [yigerende/bps-sub2apii](https://github.com/yigerende/bps-sub2apii)，镜像为 `ghcr.io/yigerende/bps-sub2api:latest`。下文保留上游功能介绍及贡献者信息。
+
 <div align="center">
 
 <img src="assets/logo.svg" alt="Sub2API Logo" width="128" />
 
-# Sub2API
+# bps-sub2api
 
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
@@ -86,13 +88,13 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 #### Installation Steps
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/install.sh | sudo bash
 ```
 
 The script will:
 1. Detect your system architecture
 2. Download the latest release
-3. Install binary to `/opt/sub2api`
+3. Install binary to `/opt/bps-sub2api`
 4. Create systemd service
 5. Configure system user and permissions
 
@@ -136,7 +138,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # Uninstall
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -156,10 +158,10 @@ Use the automated deployment script for easy setup:
 
 ```bash
 # Create deployment directory
-mkdir -p sub2api-deploy && cd sub2api-deploy
+mkdir -p sub2api-deploy && cd bps-sub2api-deploy
 
 # Download and run deployment preparation script
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/docker-deploy.sh | bash
 
 # Start services
 docker compose up -d
@@ -181,8 +183,8 @@ If you prefer manual setup:
 
 ```bash
 # 1. Clone the repository
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api/deploy
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api/deploy
 
 # 2. Copy environment configuration
 cp .env.example .env
@@ -283,7 +285,7 @@ scp sub2api-complete.tar.gz user@new-server:/path/
 
 # On new server
 tar xzf sub2api-complete.tar.gz
-cd sub2api-deploy/
+cd bps-sub2api-deploy/
 docker compose -f docker-compose.local.yml up -d
 ```
 
@@ -311,8 +313,8 @@ rm -rf data/ postgres_data/ redis_data/
 Apple-silicon Macs running macOS 26 can run the full Sub2API, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
 
 ```bash
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api/deploy
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api/deploy
 ./apple-container.sh init
 ./apple-container.sh up
 ./apple-container.sh status
@@ -337,8 +339,8 @@ Build and run from source code for development or customization.
 
 ```bash
 # 1. Clone the repository
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api
 
 # 2. Install pnpm (if not already installed)
 npm install -g pnpm

@@ -81,4 +81,4 @@ systemctl daemon-reload
 /usr/local/bin/mihomo -d /var/lib/mihomo-codex -f /etc/mihomo-codex/config.yaml -t
 systemctl enable --now mihomo-codex.service
 echo "Mihomo is listening on http://127.0.0.1:${MIHOMO_CODEX_PORT}"
-echo "Set the Sub2API 292 harvest proxy to that URL in the admin settings."
+echo "Set the bps-sub2api 292 harvest proxy to that URL in the admin settings."

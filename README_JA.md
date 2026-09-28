@@ -1,8 +1,10 @@
+> **bps-sub2api 独立部署版**：基于 [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api)，应用、PostgreSQL、Redis、网络和持久化存储使用独立名称，默认宿主机端口 `8082`。部署及升级请先看 [BPS 部署说明](docs/BPS_DEPLOY.md)。本仓库地址为 [yigerende/bps-sub2apii](https://github.com/yigerende/bps-sub2apii)，镜像为 `ghcr.io/yigerende/bps-sub2api:latest`。下文保留上游功能介绍及贡献者信息。
+
 <div align="center">
 
 <img src="assets/logo.svg" alt="Sub2API Logo" width="128" />
 
-# Sub2API
+# bps-sub2api
 
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
@@ -81,13 +83,13 @@ GitHub Releases からビルド済みバイナリをダウンロードするワ�
 #### インストール手順
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/install.sh | sudo bash
 ```
 
 スクリプトは以下を実行します:
 1. システムアーキテクチャの検出
 2. 最新リリースのダウンロード
-3. バイナリを `/opt/sub2api` にインストール
+3. バイナリを `/opt/bps-sub2api` にインストール
 4. systemd サービスの作成
 5. システムユーザーと権限の設定
 
@@ -131,7 +133,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # アンインストール
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -151,10 +153,10 @@ PostgreSQL と Redis のコンテナを含む Docker Compose でデプロイし�
 
 ```bash
 # デプロイ用ディレクトリを作成
-mkdir -p sub2api-deploy && cd sub2api-deploy
+mkdir -p sub2api-deploy && cd bps-sub2api-deploy
 
 # デプロイ準備スクリプトをダウンロードして実行
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/docker-deploy.sh | bash
 
 # サービスを起動
 docker compose up -d
@@ -176,8 +178,8 @@ docker compose logs -f sub2api
 
 ```bash
 # 1. リポジトリをクローン
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api/deploy
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api/deploy
 
 # 2. 環境設定ファイルをコピー
 cp .env.example .env
@@ -278,7 +280,7 @@ scp sub2api-complete.tar.gz user@new-server:/path/
 
 # 移行先サーバーにて
 tar xzf sub2api-complete.tar.gz
-cd sub2api-deploy/
+cd bps-sub2api-deploy/
 docker compose -f docker-compose.local.yml up -d
 ```
 
@@ -306,8 +308,8 @@ rm -rf data/ postgres_data/ redis_data/
 Apple シリコン搭載 Mac と macOS 26 では、Apple `container` 1.1.0 以降を使用して Sub2API、PostgreSQL、Redis の完全なスタックを実行できます:
 
 ```bash
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api/deploy
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api/deploy
 ./apple-container.sh init
 ./apple-container.sh up
 ./apple-container.sh status
@@ -332,8 +334,8 @@ cd sub2api/deploy
 
 ```bash
 # 1. リポジトリをクローン
-git clone --branch production https://github.com/ranxi2001/sub2api.git
-cd sub2api
+git clone --branch production https://github.com/yigerende/bps-sub2apii.git bps-sub2api
+cd bps-sub2api
 
 # 2. pnpm をインストール（未インストールの場合）
 npm install -g pnpm

@@ -1,0 +1,22 @@
+[Unit]
+Description=bps-sub2api Data Management Daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=bps-sub2api
+Group=bps-sub2api
+WorkingDirectory=/opt/bps-sub2api
+ExecStart=/opt/bps-sub2api/datamanagementd \
+  -socket-path /tmp/bps-sub2api-datamanagement.sock \
+  -sqlite-path /var/lib/bps-sub2api/datamanagement/datamanagementd.db \
+  -version 1.0.0
+Restart=always
+RestartSec=5s
+LimitNOFILE=100000
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

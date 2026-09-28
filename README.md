@@ -1,8 +1,10 @@
+> **bps-sub2api 独立部署版**：基于 [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api)，应用、PostgreSQL、Redis、网络和持久化存储使用独立名称，默认宿主机端口 `8082`。部署及升级请先看 [BPS 部署说明](docs/BPS_DEPLOY.md)。本仓库地址为 [yigerende/bps-sub2apii](https://github.com/yigerende/bps-sub2apii)，镜像为 `ghcr.io/yigerende/bps-sub2api:latest`。下文保留上游功能介绍及贡献者信息。
+
 <div align="center">
 
 <img src="assets/logo-icon.png" alt="Sub2API Logo" width="128" />
 
-# Sub2API
+# bps-sub2api
 
 [![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)

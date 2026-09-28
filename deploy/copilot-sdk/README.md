@@ -13,11 +13,11 @@
 测试示例（在适配器 checkout 的虚拟环境中运行）：
 
 ```bash
-cd /opt/sub2api-copilot/adapter
+cd /opt/bps-sub2api-copilot/adapter
 .venv/bin/python -m pip install pytest pytest-asyncio pytest-socket
 PYTHONPATH="$PWD" .venv/bin/python -m pytest --disable-socket --allow-unix-socket -q \
-  /opt/sub2api-public/deploy/copilot-sdk/test_server.py \
-  /opt/sub2api-public/deploy/copilot-sdk/test_adapter_contract.py
+  /opt/bps-sub2api-public/deploy/copilot-sdk/test_server.py \
+  /opt/bps-sub2api-public/deploy/copilot-sdk/test_adapter_contract.py
 ```
 
 生产服务只需要 `prepare.sh` 安装的运行依赖，无需安装测试包。ghcp_proxy 保持独立 checkout，固定 SHA 与 SDK 版本由服务入口验证。

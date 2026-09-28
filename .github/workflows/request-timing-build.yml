@@ -44,12 +44,12 @@ jobs:
         run: |
           mkdir -p ../artifacts
           VERSION=$(cat cmd/server/VERSION)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embed -trimpath -ldflags "-s -w -X main.Version=$VERSION -X main.Commit=$GITHUB_SHA -X main.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o ../artifacts/sub2api ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embed -trimpath -ldflags "-s -w -X main.Version=$VERSION -X main.Commit=$GITHUB_SHA -X main.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o ../artifacts/bps-sub2api ./cmd/server
           cd ../artifacts
-          sha256sum sub2api > SHA256SUMS
+          sha256sum bps-sub2api > SHA256SUMS
           printf '%s\n' "$GITHUB_SHA" > SOURCE_COMMIT
           git -C .. rev-parse HEAD^{tree} > SOURCE_TREE
-          ./sub2api --version > VERSION.txt 2>&1
+          ./bps-sub2api --version > VERSION.txt 2>&1
       - uses: actions/upload-artifact@v6
         with:
           name: request-timing-linux-amd64

@@ -1,5 +1,5 @@
 # =============================================================================
-# Sub2API Deploy Directory - Git Ignore
+# bps-sub2api Deploy Directory - Git Ignore
 # =============================================================================
 
 # Data directories (generated at runtime when using docker-compose.local.yml)
@@ -17,3 +17,8 @@ redis_data/
 # Temporary files
 *.tmp
 *.log
+
+# Isolated bps-sub2api bind mounts
+bps-sub2api-data/
+bps-sub2api-postgres-data/
+bps-sub2api-redis-data/

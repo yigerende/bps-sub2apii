@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# Sub2API Docker Deployment Preparation Script
+# bps-sub2api Docker Deployment Preparation Script
 # =============================================================================
-# This script prepares deployment files for Sub2API:
+# This script prepares deployment files for bps-sub2api:
 #   - Downloads docker-compose.local.yml and .env.example
 #   - Generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
 #   - Creates necessary data directories
@@ -21,7 +21,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # GitHub raw content base URL
-GITHUB_RAW_URL="https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy"
 
 # Print colored message
 print_info() {
@@ -54,7 +54,7 @@ command_exists() {
 main() {
     echo ""
     echo "=========================================="
-    echo "  Sub2API Deployment Preparation"
+    echo "  bps-sub2api Deployment Preparation"
     echo "=========================================="
     echo ""
 
@@ -123,7 +123,7 @@ main() {
 
     # Create data directories
     print_info "Creating data directories..."
-    mkdir -p data postgres_data redis_data
+    mkdir -p bps-sub2api-data bps-sub2api-postgres-data bps-sub2api-redis-data
     print_success "Created data directories"
 
     # Set secure permissions for .env file (readable/writable only by owner)
@@ -147,9 +147,9 @@ main() {
     echo "  docker-compose.yml        - Docker Compose configuration"
     echo "  .env                      - Environment variables (generated secrets)"
     echo "  .env.example              - Example template (for reference)"
-    echo "  data/                     - Application data (will be created on first run)"
-    echo "  postgres_data/            - PostgreSQL data"
-    echo "  redis_data/               - Redis data"
+    echo "  bps-sub2api-data/          - Application data (will be created on first run)"
+    echo "  bps-sub2api-postgres-data/            - PostgreSQL data"
+    echo "  bps-sub2api-redis-data/               - Redis data"
     echo ""
     echo "Next steps:"
     echo "  1. (Optional) Edit .env to customize configuration"
@@ -157,10 +157,10 @@ main() {
     echo "     docker-compose up -d"
     echo ""
     echo "  3. View logs:"
-    echo "     docker-compose logs -f sub2api"
+    echo "     docker-compose logs -f bps-sub2api"
     echo ""
     echo "  4. Access Web UI:"
-    echo "     http://localhost:8080"
+    echo "     http://localhost:8082"
     echo ""
     print_info "If admin password is not set in .env, it will be auto-generated."
     print_info "Check logs for the generated admin password on first startup."

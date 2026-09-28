@@ -42,7 +42,7 @@ def archive_name(version, target):
     if not VERSION_RE.fullmatch(version) or target not in targets():
         raise ValueError('invalid release version or target')
     suffix = 'zip' if target['goos'] == 'windows' else 'tar.gz'
-    return f"sub2api_{version}_{target['goos']}_{target['goarch']}.{suffix}"
+    return f"bps-sub2api_{version}_{target['goos']}_{target['goarch']}.{suffix}"
 
 
 def sha256(path):
@@ -94,9 +94,9 @@ def generate_config(args):
         # Artifacts are supplied through the OSS extra_files mechanism. No build
         # is repeated on the publishing runner, and release templates stay intact.
         data['before'] = {'hooks': []}
-        data['builds'] = [{'id': 'sub2api', 'skip': True}]
+        data['builds'] = [{'id': 'bps-sub2api', 'skip': True}]
         data['archives'] = []
-        extra = [{'glob': 'release-input/sub2api_*.tar.gz'}, {'glob': 'release-input/sub2api_*.zip'}]
+        extra = [{'glob': 'release-input/bps-sub2api_*.tar.gz'}, {'glob': 'release-input/bps-sub2api_*.zip'}]
         if args.simple:
             data['checksum'] = {'disable': True}
         else:
@@ -143,12 +143,12 @@ def contexts(args):
         dest = Path(args.output) / target['goarch']
         dest.mkdir(parents=True, exist_ok=True)
         with tarfile.open(Path(args.input) / archive_name(args.version, target), 'r:gz') as archive:
-            members = [member for member in archive.getmembers() if member.name in ('sub2api', './sub2api')]
+            members = [member for member in archive.getmembers() if member.name in ('bps-sub2api', './bps-sub2api')]
             if len(members) != 1 or not members[0].isfile():
-                raise ValueError('archive must contain one regular sub2api binary')
-            with archive.extractfile(members[0]) as source, (dest / 'sub2api').open('wb') as output:
+                raise ValueError('archive must contain one regular bps-sub2api binary')
+            with archive.extractfile(members[0]) as source, (dest / 'bps-sub2api').open('wb') as output:
                 shutil.copyfileobj(source, output)
-        (dest / 'sub2api').chmod(0o755)
+        (dest / 'bps-sub2api').chmod(0o755)
         shutil.copy2('Dockerfile.goreleaser', dest / 'Dockerfile')
         (dest / 'deploy').mkdir(exist_ok=True)
         shutil.copy2('deploy/docker-entrypoint.sh', dest / 'deploy/docker-entrypoint.sh')

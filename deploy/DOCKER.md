@@ -1,90 +1,26 @@
-# Sub2API Docker Image
+# bps-sub2api Docker deployment
 
-Sub2API is an AI API Gateway Platform for distributing and managing AI product subscription API quotas.
+Image: `ghcr.io/yigerende/bps-sub2api:latest` (Linux amd64 and arm64).
+Repository: <https://github.com/yigerende/bps-sub2apii>.
 
-## Quick Start
+Use the maintained Compose files and follow [the deployment guide](../docs/BPS_DEPLOY.md).
+They isolate the Compose project, application, PostgreSQL, Redis, networks and persistent storage from an existing sub2api deployment.
+The default host port is `8082`; the application still listens on port `8080` inside its container.
 
 ```bash
-docker run -d \
-  --name sub2api \
-  -p 8080:8080 \
-  -e DATABASE_URL="postgres://user:pass@host:5432/sub2api" \
-  -e REDIS_URL="redis://host:6379" \
-  weishaw/sub2api:latest
+mkdir -p /opt/bps-sub2api
+cd /opt/bps-sub2api
+curl -fsSL https://raw.githubusercontent.com/yigerende/bps-sub2apii/production/deploy/docker-deploy.sh -o docker-deploy.sh
+bash docker-deploy.sh
+docker compose config --quiet
+docker compose pull
+docker compose up -d
+docker compose logs -f bps-sub2api
 ```
 
-## Docker Compose
+PostgreSQL and Redis stay on the private Compose network without published host ports.
+Use a separate directory and the newly generated `.env`; do not reuse the existing installation's data or Compose project name.
 
-```yaml
-version: '3.8'
-
-services:
-  sub2api:
-    image: weishaw/sub2api:latest
-    ports:
-      - "8080:8080"
-    environment:
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/sub2api?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - db
-      - redis
-
-  db:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=sub2api
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-
-volumes:
-  postgres_data:
-  redis_data:
-```
-
-## Startup and Database Recovery
-
-Sub2API runs database migrations while starting. PostgreSQL may still be
-recovering briefly after a host or Docker daemon restart. The application
-retries transient PostgreSQL startup and connection errors with bounded
-exponential backoff, then continues startup when the database is ready.
-Permanent errors such as invalid credentials, migration checksum mismatches,
-SQL errors, and incompatible data fail immediately.
-
-The Compose deployment also checks PostgreSQL readiness with both `pg_isready`
-and a simple SQL query. `depends_on: condition: service_healthy` helps order a
-fresh Compose start, but application-level retries are still required when
-Docker restores existing containers after a host restart.
-
-## Environment Variables
-
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes | - |
-| `REDIS_URL` | Redis connection string | Yes | - |
-| `PORT` | Server port | No | `8080` |
-| `GIN_MODE` | Gin framework mode (`debug`/`release`) | No | `release` |
-
-## Supported Architectures
-
-- `linux/amd64`
-- `linux/arm64`
-
-## Tags
-
-- `latest` - Latest stable release
-- `x.y.z` - Specific version
-- `x.y` - Latest patch of minor version
-- `x` - Latest minor of major version
-
-## Links
-
-- [GitHub Repository](https://github.com/weishaw/sub2api)
-- [Documentation](https://github.com/weishaw/sub2api#readme)
+The production branch image workflow publishes `latest` and immutable `sha-<commit>` tags.
+The Release workflow publishes versioned tags when a release is created.
+Wait for the relevant image workflow to succeed before pulling a newly published image.

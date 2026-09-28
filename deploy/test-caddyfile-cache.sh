@@ -45,8 +45,8 @@ if printf '%s\n' "$normalized_config" | grep -Eiq 'cache-control.*immutable'; th
 	exit 1
 fi
 
-if ! printf '%s\n' "$normalized_config" | grep -Eq '^reverse_proxy localhost:8080([[:space:]]|$)'; then
-	echo "Caddyfile must continue proxying all application routes to localhost:8080" >&2
+if ! printf '%s\n' "$normalized_config" | grep -Eq '^reverse_proxy localhost:8082([[:space:]]|$)'; then
+	echo "Caddyfile must continue proxying all application routes to localhost:8082" >&2
 	exit 1
 fi
 
