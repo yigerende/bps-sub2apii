@@ -7419,6 +7419,20 @@
                   {{ t('admin.settings.features.excelBpsImages.baseUrlHint') }}
                 </p>
               </div>
+              <div class="mt-5 space-y-3" data-testid="bps-image-policy">
+                <label class="input-label" for="bps-image-limit-policy">{{ t('admin.settings.features.excelBpsImages.policyTitle') }}</label>
+                <select id="bps-image-limit-policy" v-model="form.excel_bps_image_limit_policy" class="input">
+                  <option value="off">{{ t('admin.settings.features.excelBpsImages.policyOff') }}</option>
+                  <option value="auto_compact">{{ t('admin.settings.features.excelBpsImages.policyAuto') }}</option>
+                  <option value="warn">{{ t('admin.settings.features.excelBpsImages.policyWarn') }}</option>
+                </select>
+                <p class="text-xs text-gray-500">{{ t('admin.settings.features.excelBpsImages.policyHint') }}</p>
+                <div v-if="form.excel_bps_image_limit_policy === 'warn'" class="grid gap-4 sm:grid-cols-2">
+                  <label class="space-y-1"><span class="input-label">{{ t('admin.settings.features.excelBpsImages.policyWarning') }}</span><input id="bps-image-warning-remaining" v-model.number="form.excel_bps_image_warning_remaining" class="input" type="number" min="1" max="4096" required /></label>
+                  <label class="space-y-1"><span class="input-label">{{ t('admin.settings.features.excelBpsImages.policyReserve') }}</span><input id="bps-image-compact-reserve" v-model.number="form.excel_bps_image_compact_reserve" class="input" type="number" min="1" max="4096" required /></label>
+                  <p class="text-xs text-gray-500 sm:col-span-2">{{ t('admin.settings.features.excelBpsImages.policyMarginsHint') }}</p>
+                </div>
+              </div>
               <h4 class="mt-6 input-label">{{ t('admin.settings.features.excelBpsImages.requestLimitsTitle') }}</h4>
               <div class="mt-5 grid gap-4 sm:grid-cols-4">
                 <div class="space-y-1">
@@ -7646,13 +7660,24 @@
           </div>
         </div>
 
-        <PelicanShowcaseSettings
-          v-model:enabled="form.pelican_showcase_enabled"
-          v-model:config="form.pelican_showcase_config"
-          :groups="pelicanShowcaseGroups"
-          :groups-loaded="pelicanShowcaseGroupsLoaded"
-          :groups-load-failed="pelicanShowcaseGroupsLoadFailed"
-        />
+        <!-- The Pelican showcase is configured with its group tests under Smart Ops. -->
+        <div class="card" data-testid="pelican-showcase-moved">
+          <div class="px-6 py-4">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.settings.features.pelicanShowcase.title') }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ t('admin.settings.features.pelicanShowcase.movedHint') }}
+              <router-link
+                to="/admin/pelican-tests"
+                class="ml-1 inline-flex items-center gap-1 text-primary-600 hover:underline dark:text-primary-400"
+              >
+                {{ t('admin.settings.features.pelicanShowcase.movedLink') }}
+                <span aria-hidden="true">→</span>
+              </router-link>
+            </p>
+          </div>
+        </div>
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
@@ -9324,7 +9349,6 @@ import type {
   DefaultSubscriptionSetting,
   DefaultPlatformQuotasMap,
   OpenAIFastPolicyRule,
-  PelicanShowcaseConfig,
   WeChatConnectMode,
   WebSearchEmulationConfig,
   WebSearchProviderConfig,
@@ -9359,11 +9383,6 @@ import BackupSettings from "@/views/admin/BackupView.vue";
 import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
 import MihomoProxySelector from "@/views/admin/settings/MihomoProxySelector.vue";
-import PelicanShowcaseSettings from "@/views/admin/settings/PelicanShowcaseSettings.vue";
-import {
-  defaultPelicanShowcaseConfig,
-  sanitizePelicanShowcaseConfig,
-} from "@/views/admin/settings/pelicanShowcase";
 import { useClipboard } from "@/composables/useClipboard";
 import {
   useStepUp,
@@ -9509,9 +9528,6 @@ const newAdminApiKey = ref("");
 const subscriptionGroups = ref<AdminGroup[]>([]);
 const codexHarvestGroups = ref<AdminGroup[]>([]);
 const codexHarvestGroupsLoadFailed = ref(false);
-const pelicanShowcaseGroups = ref<AdminGroup[]>([]);
-const pelicanShowcaseGroupsLoaded = ref(false);
-const pelicanShowcaseGroupsLoadFailed = ref(false);
 const codexHarvestGroupChoices = computed(() => {
   const known = new Set(codexHarvestGroups.value.map(group => group.id));
   return [
@@ -10059,8 +10075,6 @@ type SettingsForm = Omit<
   channel_monitor_hide_throughput: boolean;
   channel_monitor_show_quota: boolean;
   channel_monitor_hide_user_ranking: boolean;
-  pelican_showcase_enabled: boolean;
-  pelican_showcase_config: PelicanShowcaseConfig;
   smtp_password: string;
   turnstile_secret_key: string;
   tencent_captcha_app_secret_key: string;
@@ -10392,9 +10406,6 @@ const form = reactive<SettingsForm>({
   channel_monitor_hide_user_ranking: false,
   // Available Channels feature switch
   available_channels_enabled: false,
-  // Pelican showcase switch + gallery limits (defaults match the backend)
-  pelican_showcase_enabled: false,
-  pelican_showcase_config: defaultPelicanShowcaseConfig(),
   // Subscription feature switch (user sidebar "My Subscriptions" entry)
   subscription_enabled: true,
   // Model Plaza feature switches + description
@@ -10420,6 +10431,9 @@ const form = reactive<SettingsForm>({
   excel_bps_image_max_requests: 128,
   excel_bps_image_max_image_mib: 20,
   excel_bps_image_max_images: 20,
+  excel_bps_image_limit_policy: "off" as "off" | "auto_compact" | "warn",
+  excel_bps_image_warning_remaining: 8,
+  excel_bps_image_compact_reserve: 3,
   excel_bps_image_max_total_mib: 32,
   excel_bps_image_storage_mib: 1024,
   excel_bps_image_storage_entries: 512,
@@ -11621,9 +11635,6 @@ async function loadSubscriptionGroups() {
     const groups = await adminAPI.groups.getAll();
     codexHarvestGroups.value = groups.filter(group => group.platform === 'openai');
     codexHarvestGroupsLoadFailed.value = false;
-    pelicanShowcaseGroups.value = groups.filter((group) => group.status === "active");
-    pelicanShowcaseGroupsLoaded.value = true;
-    pelicanShowcaseGroupsLoadFailed.value = false;
     subscriptionGroups.value = groups.filter(
       (group) =>
         group.subscription_type === "subscription" && group.status === "active",
@@ -11632,9 +11643,6 @@ async function loadSubscriptionGroups() {
     subscriptionGroups.value = [];
     codexHarvestGroups.value = [];
     codexHarvestGroupsLoadFailed.value = true;
-    pelicanShowcaseGroups.value = [];
-    pelicanShowcaseGroupsLoaded.value = false;
-    pelicanShowcaseGroupsLoadFailed.value = true;
   }
 }
 
@@ -11749,6 +11757,7 @@ async function saveSettings() {
     }
     if (
       !Number.isInteger(form.excel_bps_image_max_image_mib) || form.excel_bps_image_max_image_mib < 1 || form.excel_bps_image_max_image_mib > 128 ||
+      (form.excel_bps_image_limit_policy === 'warn' && (!Number.isInteger(form.excel_bps_image_warning_remaining) || !Number.isInteger(form.excel_bps_image_compact_reserve) || form.excel_bps_image_compact_reserve < 1 || form.excel_bps_image_compact_reserve >= form.excel_bps_image_warning_remaining || form.excel_bps_image_warning_remaining >= form.excel_bps_image_max_images)) ||
       !Number.isInteger(form.excel_bps_image_max_images) || form.excel_bps_image_max_images < 1 || form.excel_bps_image_max_images > 4096 ||
       !Number.isInteger(form.excel_bps_image_max_total_mib) || form.excel_bps_image_max_total_mib < 1 || form.excel_bps_image_max_total_mib > 128 ||
       !Number.isInteger(form.excel_bps_image_storage_mib) || form.excel_bps_image_storage_mib < 1 || form.excel_bps_image_storage_mib > 16384 ||
@@ -12243,9 +12252,6 @@ async function saveSettings() {
       channel_monitor_hide_user_ranking: Boolean(form.channel_monitor_hide_user_ranking),
       // Available Channels feature switch
       available_channels_enabled: form.available_channels_enabled,
-      // Pelican showcase switch + gallery limits
-      pelican_showcase_enabled: form.pelican_showcase_enabled,
-      pelican_showcase_config: sanitizePelicanShowcaseConfig(form.pelican_showcase_config),
       // Subscription feature switch
       subscription_enabled: form.subscription_enabled,
       // Model Plaza feature switches + description
@@ -12268,6 +12274,10 @@ async function saveSettings() {
       excel_bps_image_max_requests: form.excel_bps_image_max_requests,
       excel_bps_image_max_image_mib: form.excel_bps_image_max_image_mib,
       excel_bps_image_max_images: form.excel_bps_image_max_images,
+      excel_bps_image_limit_policy: form.excel_bps_image_limit_policy,
+      excel_bps_image_warning_remaining: form.excel_bps_image_warning_remaining,
+      excel_bps_image_compact_reserve: form.excel_bps_image_compact_reserve,
+
       excel_bps_image_max_total_mib: form.excel_bps_image_max_total_mib,
       excel_bps_image_storage_mib: form.excel_bps_image_storage_mib,
       excel_bps_image_storage_entries: form.excel_bps_image_storage_entries,
