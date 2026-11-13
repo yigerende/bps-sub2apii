@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="compose-trusted-proxies-") as tmp:
                  "config", "--format", "json"],
                 env=env, check=True, capture_output=True, text=True,
             )
-            actual = json.loads(result.stdout)["services"]["sub2api"]["environment"].get(key)
+            actual = json.loads(result.stdout)["services"]["bps-sub2api"]["environment"].get(key)
             assert actual == expected, f"{path} ({name}): {actual!r} != {expected!r}"
 
 print("docker compose trusted proxy environment test passed")
