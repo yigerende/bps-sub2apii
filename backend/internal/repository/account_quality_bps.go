@@ -58,7 +58,22 @@ func applyQualityBPSOutcome(ctx context.Context, tx *sql.Tx, plan *service.Sched
 			return "bps_kept_usage", nil
 		}
 		// 只还原本规则写入的值：账号被人改过 BPS（或 403 自动关了）就交给管理员处理。
-		if status != "active" || !qualityBPSSnapshotEqual(qualityBPSSnapshot(extra), state.BPSApplied) {
+		if status != "active" {
+			plan.QualityRestoreDiagnostic = qualityRestoreConflict("account_not_active")
+			return "restore_conflict", nil
+		}
+		current := qualityBPSSnapshot(extra)
+		if !qualityBPSSnapshotEqual(current, state.BPSApplied) {
+			diagnostic := qualityRestoreConflict("bps_fields_changed")
+			for _, key := range service.QualityBPSManagedKeys {
+				if current[key] == nil && state.BPSApplied[key] == nil {
+					continue
+				}
+				if !qualityBPSSnapshotEqual(map[string]json.RawMessage{key: current[key]}, map[string]json.RawMessage{key: state.BPSApplied[key]}) {
+					diagnostic.ChangedFields = append(diagnostic.ChangedFields, key)
+				}
+			}
+			plan.QualityRestoreDiagnostic = diagnostic
 			return "restore_conflict", nil
 		}
 		set := make(map[string]json.RawMessage, len(state.BPSPrevious))
@@ -70,6 +85,8 @@ func applyQualityBPSOutcome(ctx context.Context, tx *sql.Tx, plan *service.Sched
 				remove = append(remove, key)
 			}
 		}
+		// Cancelling the rule while login runs must cancel automatic activation.
+		remove = append(remove, service.ExcelBPSAuthorizationPendingKey)
 		if err := qualityBPSPatchExtra(ctx, tx, plan.AccountID, set, remove); err != nil {
 			return "", err
 		}
@@ -119,8 +136,21 @@ func applyQualityBPSOutcome(ctx context.Context, tx *sql.Tx, plan *service.Sched
 		return "no_change", nil
 	}
 
+	pending := false
+	if !account.IsExcelOAuth() {
+		var ready bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM openai_excel_oauth_credentials WHERE account_id=$1 AND credentials_ciphertext<>'')`, plan.AccountID).Scan(&ready); err != nil {
+			return "", err
+		}
+		pending = !ready
+	}
 	set := map[string]json.RawMessage{}
 	var remove []string
+	if pending {
+		set[service.ExcelBPSAuthorizationPendingKey] = json.RawMessage("true")
+	} else {
+		remove = append(remove, service.ExcelBPSAuthorizationPendingKey)
+	}
 	for key, value := range service.QualityBPSExtra(policy) {
 		if value == nil {
 			remove = append(remove, key)
@@ -155,6 +185,9 @@ func applyQualityBPSOutcome(ctx context.Context, tx *sql.Tx, plan *service.Sched
 	}
 	if err := enqueueSchedulerOutbox(ctx, tx, service.SchedulerOutboxEventAccountChanged, &plan.AccountID, nil, nil); err != nil {
 		return "", err
+	}
+	if pending {
+		return "bps_authorizing", nil
 	}
 	if trigger == "usage" {
 		return "bps_enabled_usage", nil
@@ -231,7 +264,7 @@ func qualityBPSDefaultJSON(key string) json.RawMessage {
 	case service.ExcelBPS403RecoveryIntervalMinutesKey:
 		return json.RawMessage(`60`)
 	case "openai_excel_bps", service.ExcelBPSOmitUnsupportedToolsKey,
-		service.ExcelBPSIgnoreImagesKey, service.ExcelBPSIgnoreEncryptedContentKey,
+		service.ExcelBPSIgnoreEncryptedContentKey,
 		"openai_excel_bps_auto_disable_on_403", service.ExcelBPSAutoRecoverOn403Key, service.ExcelBPSAutoMoveOn403Key,
 		"openai_excel_bps_mihomo", "openai_excel_bps_cache_creation_as_input":
 		return json.RawMessage(`false`)

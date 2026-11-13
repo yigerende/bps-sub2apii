@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"time"
 
@@ -14,7 +15,14 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 26 // v26: group stream_only and user-group denied models (enforcing semantics)
+const apiKeyAuthSnapshotVersion = 34 // v34: per-key input context token ceiling
+
+// Local-only generation wrapper. Old entries remain bounded by existing TTL
+// and capacity, but cannot authorize after a subscription recovery checkpoint.
+type apiKeyAuthL1Entry struct {
+	entry *APIKeyAuthCacheEntry
+	epoch uint64
+}
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -105,12 +113,18 @@ func (s *APIKeyService) initAuthCache(cfg *config.Config) {
 // StartAuthCacheInvalidationSubscriber starts the Pub/Sub subscriber for L1 cache invalidation.
 // This should be called after the service is fully initialized.
 func (s *APIKeyService) StartAuthCacheInvalidationSubscriber(ctx context.Context) {
+	if s.localAuth != nil {
+		return
+	}
 	if s.cache == nil || (s.authCacheL1 == nil && s.authNegativeCacheL1 == nil) {
 		return
 	}
 	s.authInvalidationStart.Do(func() {
 		subscriberCtx, cancel := context.WithCancel(ctx)
 		subscriberCtx = withAuthCacheSubscriptionReady(subscriberCtx, func() {
+			// Pub/Sub has no replay. A reconnect may have missed revocations.
+			// Avoid Cache.Clear(), which is unsafe with concurrent Set/Get.
+			s.authCacheL1Epoch.Add(1)
 			s.authInvalidationConnected.Store(true)
 		})
 		s.authInvalidationCancel = cancel
@@ -184,6 +198,7 @@ func (s *APIKeyService) StopAuthCacheInvalidationSubscriber() {
 		return
 	}
 	s.authInvalidationStop.Do(func() {
+		s.regionalAuthRuntime.stop()
 		if s.authInvalidationCancel != nil {
 			s.authInvalidationCancel()
 		}
@@ -199,15 +214,15 @@ func (s *APIKeyService) authCacheKey(key string) string {
 func (s *APIKeyService) getAuthCacheEntry(ctx context.Context, cacheKey string) (*APIKeyAuthCacheEntry, bool) {
 	if s.authCacheL1 != nil {
 		if val, ok := s.authCacheL1.Get(cacheKey); ok {
-			if entry, ok := val.(*APIKeyAuthCacheEntry); ok {
-				return entry, true
+			if local, ok := val.(apiKeyAuthL1Entry); ok && local.epoch == s.authCacheL1Epoch.Load() {
+				return local.entry, true
 			}
 		}
 	}
 	if s.authNegativeCacheL1 != nil {
 		if val, ok := s.authNegativeCacheL1.Get(cacheKey); ok {
-			if entry, ok := val.(*APIKeyAuthCacheEntry); ok && entry.NotFound {
-				return entry, true
+			if local, ok := val.(apiKeyAuthL1Entry); ok && local.epoch == s.authCacheL1Epoch.Load() && local.entry.NotFound {
+				return local.entry, true
 			}
 		}
 	}
@@ -226,9 +241,10 @@ func (s *APIKeyService) setAuthCacheL1(cacheKey string, entry *APIKeyAuthCacheEn
 	if entry == nil {
 		return
 	}
+	local := apiKeyAuthL1Entry{entry: entry, epoch: s.authCacheL1Epoch.Load()}
 	if entry.NotFound {
 		if s.authNegativeCacheL1 != nil && s.authCfg.negativeTTL > 0 {
-			_ = s.authNegativeCacheL1.SetWithTTL(cacheKey, entry, 1, s.authCfg.jitterTTL(s.authCfg.negativeTTL))
+			_ = s.authNegativeCacheL1.SetWithTTL(cacheKey, local, 1, s.authCfg.jitterTTL(s.authCfg.negativeTTL))
 		}
 		return
 	}
@@ -237,7 +253,7 @@ func (s *APIKeyService) setAuthCacheL1(cacheKey string, entry *APIKeyAuthCacheEn
 	}
 	ttl := s.authCfg.l1TTL
 	ttl = s.authCfg.jitterTTL(ttl)
-	_ = s.authCacheL1.SetWithTTL(cacheKey, entry, 1, ttl)
+	_ = s.authCacheL1.SetWithTTL(cacheKey, local, 1, ttl)
 }
 
 func (s *APIKeyService) setAuthCacheEntry(ctx context.Context, cacheKey string, entry *APIKeyAuthCacheEntry, ttl time.Duration) {
@@ -288,7 +304,9 @@ func (s *APIKeyService) loadAuthCacheEntry(ctx context.Context, key, cacheKey st
 	}
 	snapshot := s.snapshotFromAPIKey(ctx, apiKey)
 	if snapshot == nil {
-		return nil, fmt.Errorf("get api key: %w", ErrAPIKeyNotFound)
+		// A known key with a missing owner is an identity/business failure,
+		// never proof of an unknown anonymous credential. Do not negative-cache it.
+		return nil, fmt.Errorf("get api key: %w", ErrUserNotFound)
 	}
 	entry := &APIKeyAuthCacheEntry{Snapshot: snapshot}
 	s.setAuthCacheEntry(ctx, cacheKey, entry, s.authCfg.l2TTL)
@@ -353,20 +371,26 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 		return nil
 	}
 	snapshot := &APIKeyAuthSnapshot{
-		Version:     apiKeyAuthSnapshotVersion,
-		APIKeyID:    apiKey.ID,
-		UserID:      apiKey.UserID,
-		GroupID:     apiKey.GroupID,
-		Name:        apiKey.Name,
-		Status:      apiKey.Status,
-		IPWhitelist: apiKey.IPWhitelist,
-		IPBlacklist: apiKey.IPBlacklist,
-		Quota:       apiKey.Quota,
-		QuotaUsed:   apiKey.QuotaUsed,
-		ExpiresAt:   apiKey.ExpiresAt,
-		RateLimit5h: apiKey.RateLimit5h,
-		RateLimit1d: apiKey.RateLimit1d,
-		RateLimit7d: apiKey.RateLimit7d,
+		Version:           apiKeyAuthSnapshotVersion,
+		APIKeyID:          apiKey.ID,
+		UserID:            apiKey.UserID,
+		GroupIDs:          append([]int64(nil), apiKey.GroupIDs...),
+		GroupID:           apiKey.GroupID,
+		Name:              apiKey.Name,
+		Status:            apiKey.Status,
+		ModelMapping:      maps.Clone(apiKey.ModelMapping),
+		ReasoningEffort:   apiKey.ReasoningEffort,
+		AllowLongContext:  apiKey.AllowLongContext,
+		ContextTokenLimit: apiKey.ContextTokenLimit,
+		IPWhitelist:       apiKey.IPWhitelist,
+		IPBlacklist:       apiKey.IPBlacklist,
+		Quota:             apiKey.Quota,
+		QuotaUsed:         apiKey.QuotaUsed,
+		ExpiresAt:         apiKey.ExpiresAt,
+		RateLimit5h:       apiKey.RateLimit5h,
+		ConcurrencyLimit:  apiKey.ConcurrencyLimit,
+		RateLimit1d:       apiKey.RateLimit1d,
+		RateLimit7d:       apiKey.RateLimit7d,
 		User: APIKeyAuthUserSnapshot{
 			ID:                         apiKey.User.ID,
 			Status:                     apiKey.User.Status,
@@ -409,6 +433,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			MonthlyLimitUSD:                 apiKey.Group.MonthlyLimitUSD,
 			AllowImageGeneration:            apiKey.Group.AllowImageGeneration,
 			AllowBatchImageGeneration:       apiKey.Group.AllowBatchImageGeneration,
+			ImageCountBilling:               apiKey.Group.ImageCountBilling,
 			ImageRateIndependent:            apiKey.Group.ImageRateIndependent,
 			ImageRateMultiplier:             apiKey.Group.ImageRateMultiplier,
 			ImagePrice1K:                    apiKey.Group.ImagePrice1K,
@@ -431,6 +456,8 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			FallbackGroupID:                 apiKey.Group.FallbackGroupID,
 			FallbackGroupIDOnInvalidRequest: apiKey.Group.FallbackGroupIDOnInvalidRequest,
 			StreamOnly:                      apiKey.Group.StreamOnly,
+			CodexCLIOnly:                    apiKey.Group.CodexCLIOnly,
+			BlockSubagents:                  apiKey.Group.BlockSubagents,
 			ModelRouting:                    apiKey.Group.ModelRouting,
 			ModelRoutingEnabled:             apiKey.Group.ModelRoutingEnabled,
 			MCPXMLInject:                    apiKey.Group.MCPXMLInject,
@@ -464,20 +491,26 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 		return nil
 	}
 	apiKey := &APIKey{
-		ID:          snapshot.APIKeyID,
-		UserID:      snapshot.UserID,
-		GroupID:     snapshot.GroupID,
-		Key:         key,
-		Name:        snapshot.Name,
-		Status:      snapshot.Status,
-		IPWhitelist: snapshot.IPWhitelist,
-		IPBlacklist: snapshot.IPBlacklist,
-		Quota:       snapshot.Quota,
-		QuotaUsed:   snapshot.QuotaUsed,
-		ExpiresAt:   snapshot.ExpiresAt,
-		RateLimit5h: snapshot.RateLimit5h,
-		RateLimit1d: snapshot.RateLimit1d,
-		RateLimit7d: snapshot.RateLimit7d,
+		ID:                snapshot.APIKeyID,
+		UserID:            snapshot.UserID,
+		GroupIDs:          append([]int64(nil), snapshot.GroupIDs...),
+		GroupID:           snapshot.GroupID,
+		Key:               key,
+		Name:              snapshot.Name,
+		Status:            snapshot.Status,
+		ModelMapping:      maps.Clone(snapshot.ModelMapping),
+		ReasoningEffort:   snapshot.ReasoningEffort,
+		AllowLongContext:  snapshot.AllowLongContext,
+		ContextTokenLimit: snapshot.ContextTokenLimit,
+		IPWhitelist:       snapshot.IPWhitelist,
+		IPBlacklist:       snapshot.IPBlacklist,
+		Quota:             snapshot.Quota,
+		QuotaUsed:         snapshot.QuotaUsed,
+		ExpiresAt:         snapshot.ExpiresAt,
+		RateLimit5h:       snapshot.RateLimit5h,
+		ConcurrencyLimit:  snapshot.ConcurrencyLimit,
+		RateLimit1d:       snapshot.RateLimit1d,
+		RateLimit7d:       snapshot.RateLimit7d,
 		User: &User{
 			ID:                         snapshot.User.ID,
 			Status:                     snapshot.User.Status,
@@ -513,6 +546,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			MonthlyLimitUSD:                 snapshot.Group.MonthlyLimitUSD,
 			AllowImageGeneration:            snapshot.Group.AllowImageGeneration,
 			AllowBatchImageGeneration:       snapshot.Group.AllowBatchImageGeneration,
+			ImageCountBilling:               snapshot.Group.ImageCountBilling,
 			ImageRateIndependent:            snapshot.Group.ImageRateIndependent,
 			ImageRateMultiplier:             snapshot.Group.ImageRateMultiplier,
 			ImagePrice1K:                    snapshot.Group.ImagePrice1K,
@@ -535,6 +569,8 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			FallbackGroupID:                 snapshot.Group.FallbackGroupID,
 			FallbackGroupIDOnInvalidRequest: snapshot.Group.FallbackGroupIDOnInvalidRequest,
 			StreamOnly:                      snapshot.Group.StreamOnly,
+			CodexCLIOnly:                    snapshot.Group.CodexCLIOnly,
+			BlockSubagents:                  snapshot.Group.BlockSubagents,
 			ModelRouting:                    snapshot.Group.ModelRouting,
 			ModelRoutingEnabled:             snapshot.Group.ModelRoutingEnabled,
 			MCPXMLInject:                    snapshot.Group.MCPXMLInject,

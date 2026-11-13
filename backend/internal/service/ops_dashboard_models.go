@@ -9,6 +9,10 @@ type OpsDashboardFilter struct {
 	Platform string
 	GroupID  *int64
 
+	// Internal fallback scope: attribute traffic to OpenAI OAuth accounts, not
+	// the OpenAI-compatible protocol. Hourly platform aggregates cannot serve it.
+	OpenAIOAuthOnly bool
+
 	// QueryMode controls whether dashboard queries should use raw logs or pre-aggregated tables.
 	// Expected values: auto/raw/preagg (see OpsQueryMode).
 	QueryMode OpsQueryMode
@@ -27,6 +31,15 @@ type OpsPercentiles struct {
 	P99 *int `json:"p99_ms"`
 	Avg *int `json:"avg_ms"`
 	Max *int `json:"max_ms"`
+}
+
+// OpsOutputTPS describes per-request output rates, not aggregate token throughput.
+type OpsOutputTPS struct {
+	P5          *float64 `json:"p5"`
+	P10         *float64 `json:"p10"`
+	P50         *float64 `json:"p50"`
+	Avg         *float64 `json:"avg"`
+	SampleCount int64    `json:"sample_count"`
 }
 
 type OpsDashboardOverview struct {
@@ -62,8 +75,9 @@ type OpsDashboardOverview struct {
 	Upstream429Count             int64   `json:"upstream_429_count"`
 	Upstream529Count             int64   `json:"upstream_529_count"`
 
-	QPS OpsRateSummary `json:"qps"`
-	TPS OpsRateSummary `json:"tps"`
+	QPS       OpsRateSummary `json:"qps"`
+	TPS       OpsRateSummary `json:"tps"`
+	OutputTPS *OpsOutputTPS  `json:"output_tps"`
 
 	Duration OpsPercentiles `json:"duration"`
 	TTFT     OpsPercentiles `json:"ttft"`

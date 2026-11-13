@@ -1,8 +1,19 @@
 <template>
   <AppLayout>
     <div class="space-y-6 pb-6">
+      <!-- Notice on how to read imperfect drawings; only while there are results to look at. -->
+      <p
+        v-if="groups.length"
+        role="note"
+        class="mt-3 flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm leading-relaxed text-sky-900 dark:border-sky-800/60 dark:bg-sky-950/30 dark:text-sky-100 md:mt-4"
+        data-testid="showcase-notice"
+      >
+        <Icon name="infoCircle" size="sm" class="mt-0.5 flex-shrink-0 text-sky-500 dark:text-sky-400" />
+        <span>{{ t('pelicanShowcase.notice') }}</span>
+      </p>
+
       <!-- Toolbar: group filter + the gallery rules + refresh -->
-      <section class="flex flex-col gap-3 pt-3 md:flex-row md:items-center md:justify-between md:pt-4">
+      <section class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between" :class="groups.length ? '' : 'pt-3 md:pt-4'">
         <div
           v-if="groups.length > 1"
           role="tablist"
@@ -40,6 +51,15 @@
               {{ t('pelicanShowcase.retentionRule', { days: view.retention_days }) }}
             </span>
           </template>
+          <button
+            v-if="view?.enabled"
+            type="button"
+            class="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-dark-700 dark:hover:text-white"
+            data-testid="showcase-api-open"
+            @click="showApiDialog = true"
+          >
+            <Icon name="terminal" size="sm" />{{ t('pelicanShowcase.api.title') }}
+          </button>
           <button
             type="button"
             class="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-dark-700 dark:hover:text-gray-200"
@@ -132,6 +152,13 @@
       </section>
     </div>
 
+    <PelicanShowcaseApiDialog
+      :show="showApiDialog"
+      :enabled="view?.enabled === true && view.api_enabled === true"
+      :item-id="apiItemId"
+      @close="showApiDialog = false"
+    />
+
     <BaseDialog
       :show="preview !== null"
       :title="previewTitle"
@@ -222,6 +249,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
 import PelicanArtworkPreview from '@/components/user/pelican/PelicanArtworkPreview.vue'
+import PelicanShowcaseApiDialog from '@/components/user/pelican/PelicanShowcaseApiDialog.vue'
 import PelicanShowcaseCard from '@/components/user/pelican/PelicanShowcaseCard.vue'
 import PelicanShowcaseRow from '@/components/user/pelican/PelicanShowcaseRow.vue'
 import {
@@ -264,6 +292,7 @@ const preview = ref<{ group: PelicanShowcaseGroup; item: PelicanShowcaseItem } |
 const previewMode = ref<'fit' | 'actual'>('fit')
 const confirmingRemove = ref(false)
 const removing = ref(false)
+const showApiDialog = ref(false)
 
 let alive = true
 let loadController: AbortController | null = null
@@ -271,6 +300,7 @@ const bodyQueue: number[] = []
 let bodiesInFlight = 0
 
 const groups = computed(() => (view.value?.enabled ? view.value.groups : []))
+const apiItemId = computed(() => groups.value.find((group) => group.items.length)?.items[0]?.id)
 const tabs = computed(() => [
   { key: 'all' as TabKey, label: t('pelicanShowcase.allGroups'), count: undefined as number | undefined },
   ...groups.value.map((group) => ({ key: group.id as TabKey, label: group.name, count: group.items.length })),

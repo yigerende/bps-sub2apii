@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/upstreamroute"
 	"github.com/Wei-Shaw/sub2api/internal/requestcapture"
 	"golang.org/x/sync/errgroup"
 )
@@ -69,9 +70,13 @@ func (e *openAIWSDialError) Unwrap() error {
 }
 
 type openAIWSAcquireRequest struct {
-	Account *Account
-	WSURL   string
-	Headers http.Header
+	timezoneBinding *requestTimezoneBinding
+	timezoneMode    string
+	// Private experiment connections must never serve a different client scope.
+	AnchorScope string
+	Account     *Account
+	WSURL       string
+	Headers     http.Header
 	// HeadersFactory is evaluated inside dialConn. It exists so credentials
 	// whose authorization is per-dial (Agent Identity) are never cached in
 	// lastAcquire or delayed prewarm state.
@@ -87,6 +92,9 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	timezoneMode        string
+	timezoneHeaders     [3]string
+	anchorScope         string
 	betaFeatures        string
 	codexInstallationID string
 	sessionIDHyphen     string
@@ -287,6 +295,7 @@ type openAIWSConn struct {
 	ws openAIWSClientConn
 
 	handshakeHeaders       http.Header
+	agentRecoveryHeaders   http.Header
 	turnBinding            *openAIWSTurnBinding
 	handshakeCompatibility openAIWSHandshakeCompatibilityKey
 	routingAffinity        string
@@ -297,6 +306,9 @@ type openAIWSConn struct {
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
+	// The subscription backend fixes hosted-search support on the first create.
+	responseCreateSent bool // guarded by writeMu
+	initialWebSearch   bool // guarded by writeMu
 
 	// readerLoopResults 非 nil 表示池为该连接常驻了读循环：coder/websocket 只在
 	// 阻塞读期间应答上游 ping，空闲连接没有读循环会被上游按保活超时关闭。
@@ -309,10 +321,11 @@ type openAIWSConn struct {
 	// unusable 表示空闲期收到数据被判为脏连接：持有令牌不再借出，由池在锁外关闭。
 	unusable atomic.Bool
 
-	waiters       atomic.Int32
-	createdAtNano atomic.Int64
-	lastUsedNano  atomic.Int64
-	prewarmed     atomic.Bool
+	waiters         atomic.Int32
+	createdAtNano   atomic.Int64
+	lastUsedNano    atomic.Int64
+	anchorUntilNano atomic.Int64
+	prewarmed       atomic.Bool
 }
 
 func newOpenAIWSConn(id string, _ int64, ws openAIWSClientConn, handshakeHeaders http.Header) *openAIWSConn {
@@ -605,6 +618,9 @@ func (c *openAIWSConn) writeJSON(value any, writeCtx context.Context) error {
 	if err := c.ws.WriteJSON(writeCtx, value); err != nil {
 		return err
 	}
+	if !c.responseCreateSent {
+		c.recordInitialWebSearch(value)
+	}
 	c.touch()
 	return nil
 }
@@ -869,7 +885,7 @@ type openAIWSConnPool struct {
 func newOpenAIWSConnPool(cfg *config.Config) *openAIWSConnPool {
 	pool := &openAIWSConnPool{
 		cfg:          cfg,
-		clientDialer: newDefaultOpenAIWSClientDialer(),
+		clientDialer: newConfiguredOpenAIWSClientDialer(cfg),
 		workerStopCh: make(chan struct{}),
 	}
 	pool.startBackgroundWorkers()
@@ -1112,6 +1128,15 @@ type openAIWSAcquireQueueWait struct {
 }
 
 func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConnLease, error) {
+	if ctx != nil {
+		req.timezoneBinding, _ = ctx.Value(requestTimezoneEgressKey{}).(*requestTimezoneBinding)
+	}
+	if b := req.timezoneBinding; b != nil && b.service.settingService.GetOpenAIRequestTimezoneEnabled(ctx, false) {
+		req.timezoneMode = "manual"
+		if b.service.settingService.GetOpenAIRequestTimezoneAuto(ctx, false) {
+			req.timezoneMode = "auto"
+		}
+	}
 	if p != nil {
 		p.metrics.acquireTotal.Add(1)
 	}
@@ -1686,7 +1711,7 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 			evicted = append(evicted, conn)
 			continue
 		}
-		if p.isConnPinnedLocked(ap, id) {
+		if now.UnixNano() < conn.anchorUntilNano.Load() || p.isConnPinnedLocked(ap, id) {
 			continue
 		}
 		if !conn.isLeased() && conn.waiters.Load() == 0 &&
@@ -1727,7 +1752,7 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 				continue
 			}
 			// 有等待者的连接不能在清理阶段被淘汰，否则等待中的 acquire 会收到 closed 错误。
-			if conn.isLeased() || conn.waiters.Load() > 0 || p.isConnPinnedLocked(ap, conn.id) {
+			if conn.isLeased() || conn.waiters.Load() > 0 || now.UnixNano() < conn.anchorUntilNano.Load() || p.isConnPinnedLocked(ap, conn.id) {
 				continue
 			}
 			idleConns = append(idleConns, conn)
@@ -2149,13 +2174,30 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
+	if req.Account != nil {
+		ctx = upstreamroute.WithAccountID(ctx, req.Account.ID)
+	}
+	if req.timezoneBinding != nil {
+		ctx = context.WithValue(ctx, requestTimezoneEgressKey{}, req.timezoneBinding)
+	}
+	accountIDForCapture := int64(0)
+	if req.Account != nil {
+		accountIDForCapture = req.Account.ID
+	}
+	finishCapture := captureOpenAIWSHandshake(ctx, accountIDForCapture, req.WSURL)
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	captureErr := err
+	if captureErr == nil && conn == nil {
+		captureErr = errors.New("openai ws dialer returned nil connection")
+	}
+	finishCapture(status, handshakeHeaders, captureErr)
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte
 		if errors.As(err, &handshakeErr) && handshakeErr != nil {
 			responseBody = append([]byte(nil), handshakeErr.Body...)
 		}
+		captureOpenAIWSHandshakeBody(ctx, responseBody, handshakeHeaders)
 		return nil, &openAIWSDialError{
 			StatusCode:      status,
 			ResponseHeaders: cloneHeader(handshakeHeaders),
@@ -2172,6 +2214,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	}
 	id := p.nextConnID(req.Account.ID)
 	pooledConn := newOpenAIWSConn(id, req.Account.ID, conn, handshakeHeaders)
+	pooledConn.agentRecoveryHeaders = cloneHeader(headers)
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
@@ -2344,6 +2387,8 @@ func (p *openAIWSConnPool) dialTimeout() time.Duration {
 func openAIWSAcquireCompatibility(req openAIWSAcquireRequest) openAIWSHandshakeCompatibilityKey {
 	key := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
 	key.proxyURL = stringsTrim(req.ProxyURL)
+	key.anchorScope = req.AnchorScope
+	key.timezoneMode = req.timezoneMode
 	return key
 }
 
@@ -2365,7 +2410,7 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 }
 
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
-	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
+	return a.timezoneMode == b.timezoneMode && stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
 		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
 		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers)
 }
@@ -2397,7 +2442,8 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 
 func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
-		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+		betaFeatures:    normalizeOpenAIWSBetaFeatures(headers),
+		timezoneHeaders: [3]string{headers.Get("Oai-Client-Timezone"), headers.Get("X-Openai-Timezone"), headers.Get("X-Timezone")},
 	}
 	mode := activeCodexFingerprintMode(account)
 	if mode == codexFingerprintOff {

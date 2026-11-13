@@ -62,12 +62,18 @@ type PaymentConfig struct {
 	// SubscriptionUSDToCNYRate 为 0 时订阅换算关闭（兼容存量行为）。
 	SubscriptionUSDToCNYRate float64 `json:"subscription_usd_to_cny_rate"`
 	RechargeFeeRate          float64 `json:"recharge_fee_rate"`
-	LoadBalanceStrategy      string  `json:"load_balance_strategy"`
-	ProductNamePrefix        string  `json:"product_name_prefix"`
-	ProductNameSuffix        string  `json:"product_name_suffix"`
-	HelpImageURL             string  `json:"help_image_url"`
-	HelpText                 string  `json:"help_text"`
-	StripePublishableKey     string  `json:"stripe_publishable_key,omitempty"`
+	// RechargeBonusTiers 余额充值优惠阶梯（按 MinAmount 升序）；空表示无优惠。
+	RechargeBonusTiers []RechargeBonusTier `json:"recharge_bonus_tiers"`
+	// RechargeBonusMode 阶梯模式：bonus（赠金）/ discount（折扣），已归一化。
+	RechargeBonusMode string `json:"recharge_bonus_mode"`
+	// RechargeBonusNotice 充值页展示的 Markdown 活动文案；空表示不展示。
+	RechargeBonusNotice  string `json:"recharge_bonus_notice"`
+	LoadBalanceStrategy  string `json:"load_balance_strategy"`
+	ProductNamePrefix    string `json:"product_name_prefix"`
+	ProductNameSuffix    string `json:"product_name_suffix"`
+	HelpImageURL         string `json:"help_image_url"`
+	HelpText             string `json:"help_text"`
+	StripePublishableKey string `json:"stripe_publishable_key,omitempty"`
 
 	// Cancel rate limit settings
 	CancelRateLimitEnabled bool   `json:"cancel_rate_limit_enabled"`
@@ -95,11 +101,15 @@ type UpdatePaymentConfigRequest struct {
 	BalanceRechargeMultiplier *float64 `json:"balance_recharge_multiplier"`
 	SubscriptionUSDToCNYRate  *float64 `json:"subscription_usd_to_cny_rate"`
 	RechargeFeeRate           *float64 `json:"recharge_fee_rate"`
-	LoadBalanceStrategy       *string  `json:"load_balance_strategy"`
-	ProductNamePrefix         *string  `json:"product_name_prefix"`
-	ProductNameSuffix         *string  `json:"product_name_suffix"`
-	HelpImageURL              *string  `json:"help_image_url"`
-	HelpText                  *string  `json:"help_text"`
+	// RechargeBonusTiers nil 表示不更新；空切片表示清空阶梯。
+	RechargeBonusTiers  *[]RechargeBonusTier `json:"recharge_bonus_tiers"`
+	RechargeBonusMode   *string              `json:"recharge_bonus_mode"`
+	RechargeBonusNotice *string              `json:"recharge_bonus_notice"`
+	LoadBalanceStrategy *string              `json:"load_balance_strategy"`
+	ProductNamePrefix   *string              `json:"product_name_prefix"`
+	ProductNameSuffix   *string              `json:"product_name_suffix"`
+	HelpImageURL        *string              `json:"help_image_url"`
+	HelpText            *string              `json:"help_text"`
 
 	// Cancel rate limit settings
 	CancelRateLimitEnabled *bool   `json:"cancel_rate_limit_enabled"`
@@ -121,13 +131,23 @@ type UpdatePaymentConfigRequest struct {
 
 // MethodLimits holds per-payment-type limits.
 type MethodLimits struct {
-	PaymentType string  `json:"payment_type"`
-	DisplayName string  `json:"display_name,omitempty"`
-	Currency    string  `json:"currency"`
-	FeeRate     float64 `json:"fee_rate"`
-	DailyLimit  float64 `json:"daily_limit"`
-	SingleMin   float64 `json:"single_min"`
-	SingleMax   float64 `json:"single_max"`
+	PaymentType string                    `json:"payment_type"`
+	DisplayName string                    `json:"display_name,omitempty"`
+	Currency    string                    `json:"currency"`
+	FeeRate     float64                   `json:"fee_rate"`
+	FeeRateMin  float64                   `json:"fee_rate_min"`
+	FeeRateMax  float64                   `json:"fee_rate_max"`
+	SubMethods  map[string]MethodFeeRates `json:"sub_methods,omitempty"`
+	DailyLimit  float64                   `json:"daily_limit"`
+	SingleMin   float64                   `json:"single_min"`
+	SingleMax   float64                   `json:"single_max"`
+}
+
+// MethodFeeRates describes the effective fee range across eligible instances.
+type MethodFeeRates struct {
+	FeeRate    float64 `json:"fee_rate"`
+	FeeRateMin float64 `json:"fee_rate_min"`
+	FeeRateMax float64 `json:"fee_rate_max"`
 }
 
 // MethodLimitsResponse is the full response for the user-facing /limits API.
@@ -139,28 +159,32 @@ type MethodLimitsResponse struct {
 }
 
 type CreateProviderInstanceRequest struct {
-	ProviderKey     string            `json:"provider_key"`
-	Name            string            `json:"name"`
-	Config          map[string]string `json:"config"`
-	SupportedTypes  []string          `json:"supported_types"`
-	Enabled         bool              `json:"enabled"`
-	PaymentMode     string            `json:"payment_mode"`
-	SortOrder       int               `json:"sort_order"`
-	Limits          string            `json:"limits"`
-	RefundEnabled   bool              `json:"refund_enabled"`
-	AllowUserRefund bool              `json:"allow_user_refund"`
+	FeeRate         *float64            `json:"fee_rate"`
+	MethodFeeRates  MethodFeeRatesPatch `json:"method_fee_rates"`
+	ProviderKey     string              `json:"provider_key"`
+	Name            string              `json:"name"`
+	Config          map[string]string   `json:"config"`
+	SupportedTypes  []string            `json:"supported_types"`
+	Enabled         bool                `json:"enabled"`
+	PaymentMode     string              `json:"payment_mode"`
+	SortOrder       int                 `json:"sort_order"`
+	Limits          string              `json:"limits"`
+	RefundEnabled   bool                `json:"refund_enabled"`
+	AllowUserRefund bool                `json:"allow_user_refund"`
 }
 
 type UpdateProviderInstanceRequest struct {
-	Name            *string           `json:"name"`
-	Config          map[string]string `json:"config"`
-	SupportedTypes  []string          `json:"supported_types"`
-	Enabled         *bool             `json:"enabled"`
-	PaymentMode     *string           `json:"payment_mode"`
-	SortOrder       *int              `json:"sort_order"`
-	Limits          *string           `json:"limits"`
-	RefundEnabled   *bool             `json:"refund_enabled"`
-	AllowUserRefund *bool             `json:"allow_user_refund"`
+	FeeRate         NullableFeeRateField `json:"fee_rate"`
+	MethodFeeRates  MethodFeeRatesPatch  `json:"method_fee_rates"`
+	Name            *string              `json:"name"`
+	Config          map[string]string    `json:"config"`
+	SupportedTypes  []string             `json:"supported_types"`
+	Enabled         *bool                `json:"enabled"`
+	PaymentMode     *string              `json:"payment_mode"`
+	SortOrder       *int                 `json:"sort_order"`
+	Limits          *string              `json:"limits"`
+	RefundEnabled   *bool                `json:"refund_enabled"`
+	AllowUserRefund *bool                `json:"allow_user_refund"`
 }
 type CreatePlanRequest struct {
 	GroupID       int64    `json:"group_id"`
@@ -220,6 +244,7 @@ func (s *PaymentConfigService) GetPaymentConfig(ctx context.Context) (*PaymentCo
 		SettingPaymentEnabled, SettingMinRechargeAmount, SettingMaxRechargeAmount,
 		SettingDailyRechargeLimit, SettingOrderTimeoutMinutes, SettingMaxPendingOrders,
 		SettingEnabledPaymentTypes, SettingBalancePayDisabled, SettingBalanceRechargeMult, SettingSubscriptionUSDToCNYRate, SettingRechargeFeeRate, SettingLoadBalanceStrategy,
+		SettingRechargeBonusTiers, SettingRechargeBonusMode, SettingRechargeBonusNotice,
 		SettingProductNamePrefix, SettingProductNameSuffix,
 		SettingHelpImageURL, SettingHelpText,
 		SettingCancelRateLimitOn, SettingCancelRateLimitMax,
@@ -250,6 +275,8 @@ func (s *PaymentConfigService) parsePaymentConfig(vals map[string]string) *Payme
 		BalanceRechargeMultiplier: normalizeBalanceRechargeMultiplier(pcParseFloat(vals[SettingBalanceRechargeMult], defaultBalanceRechargeMultiplier)),
 		SubscriptionUSDToCNYRate:  normalizeSubscriptionUSDToCNYRate(pcParseFloat(vals[SettingSubscriptionUSDToCNYRate], 0)),
 		RechargeFeeRate:           pcParseFloat(vals[SettingRechargeFeeRate], 0),
+		RechargeBonusTiers:        parseRechargeBonusTiers(vals[SettingRechargeBonusTiers]),
+		RechargeBonusNotice:       vals[SettingRechargeBonusNotice],
 		LoadBalanceStrategy:       vals[SettingLoadBalanceStrategy],
 		ProductNamePrefix:         vals[SettingProductNamePrefix],
 		ProductNameSuffix:         vals[SettingProductNameSuffix],
@@ -265,6 +292,7 @@ func (s *PaymentConfigService) parsePaymentConfig(vals map[string]string) *Payme
 		AlipayForceQRCode:             vals[SettingAlipayForceQRCode] == "true",
 		AlipayMobilePrecreateDeepLink: vals[SettingAlipayMobilePrecreateDeepLink] == "true",
 	}
+	cfg.RechargeBonusMode, _ = NormalizeRechargeBonusMode(vals[SettingRechargeBonusMode])
 	cfg.AlipayMobilePrecreateDeepLink = pcEnvBoolOverride(
 		SettingAlipayMobilePrecreateDeepLink,
 		cfg.AlipayMobilePrecreateDeepLink,
@@ -323,8 +351,14 @@ func (s *PaymentConfigService) getStripePublishableKey(ctx context.Context) stri
 // and cannot be meaningfully decomposed without introducing unnecessary abstraction.
 func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req UpdatePaymentConfigRequest) error {
 	if req.BalanceRechargeMultiplier != nil {
-		if math.IsNaN(*req.BalanceRechargeMultiplier) || math.IsInf(*req.BalanceRechargeMultiplier, 0) || *req.BalanceRechargeMultiplier <= 0 {
+		v := *req.BalanceRechargeMultiplier
+		if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
 			return infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier must be greater than 0")
+		}
+		// 6 位小数可容纳实时汇率（如 1 USD = 7.100000 CNY → 0.140845），
+		// 到账金额仍按结算币种精度取整，余额不会被放大精度。
+		if balanceRechargeMultiplierHasExcessPrecision(v) {
+			return infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier allows at most 6 decimal places")
 		}
 	}
 	if req.SubscriptionUSDToCNYRate != nil {
@@ -341,6 +375,15 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 		// Enforce max 2 decimal places
 		if math.Round(v*100) != v*100 {
 			return infraerrors.BadRequest("INVALID_RECHARGE_FEE_RATE", "recharge fee rate allows at most 2 decimal places")
+		}
+	}
+	rechargeBonusTiersValue, rechargeBonusModeValue, err := s.resolveRechargeBonusUpdate(ctx, req)
+	if err != nil {
+		return err
+	}
+	if req.RechargeBonusNotice != nil {
+		if err := validateRechargeBonusNotice(*req.RechargeBonusNotice); err != nil {
+			return infraerrors.BadRequest("INVALID_RECHARGE_BONUS_NOTICE", err.Error())
 		}
 	}
 	m := make(map[string]string)
@@ -369,13 +412,22 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 		m[SettingBalancePayDisabled] = formatBoolOrEmpty(req.BalanceDisabled)
 	}
 	if req.BalanceRechargeMultiplier != nil {
-		m[SettingBalanceRechargeMult] = formatPositiveFloat(req.BalanceRechargeMultiplier)
+		m[SettingBalanceRechargeMult] = formatBalanceRechargeMultiplier(req.BalanceRechargeMultiplier)
 	}
 	if req.SubscriptionUSDToCNYRate != nil {
 		m[SettingSubscriptionUSDToCNYRate] = formatPositiveFloatExact(req.SubscriptionUSDToCNYRate)
 	}
 	if req.RechargeFeeRate != nil {
 		m[SettingRechargeFeeRate] = formatNonNegativeFloat(req.RechargeFeeRate)
+	}
+	if req.RechargeBonusTiers != nil {
+		m[SettingRechargeBonusTiers] = rechargeBonusTiersValue
+	}
+	if req.RechargeBonusMode != nil {
+		m[SettingRechargeBonusMode] = rechargeBonusModeValue
+	}
+	if req.RechargeBonusNotice != nil {
+		m[SettingRechargeBonusNotice] = strings.TrimSpace(*req.RechargeBonusNotice)
 	}
 	if req.LoadBalanceStrategy != nil {
 		m[SettingLoadBalanceStrategy] = derefStr(req.LoadBalanceStrategy)
@@ -440,6 +492,21 @@ func formatPositiveFloat(v *float64) string {
 		return "" // empty → parsePaymentConfig uses default
 	}
 	return strconv.FormatFloat(*v, 'f', 2, 64)
+}
+
+const balanceRechargeMultiplierMaxDecimals = 6
+
+func balanceRechargeMultiplierHasExcessPrecision(v float64) bool {
+	scaled := v * math.Pow(10, balanceRechargeMultiplierMaxDecimals)
+	return math.Abs(scaled-math.Round(scaled)) > 1e-6
+}
+
+func formatBalanceRechargeMultiplier(v *float64) string {
+	if v == nil || *v <= 0 {
+		return "" // empty → parsePaymentConfig uses default
+	}
+	rounded := math.Round(*v*math.Pow(10, balanceRechargeMultiplierMaxDecimals)) / math.Pow(10, balanceRechargeMultiplierMaxDecimals)
+	return strconv.FormatFloat(rounded, 'f', -1, 64)
 }
 
 // formatPositiveFloatExact 保留完整精度，用于汇率等对小数位敏感的配置。

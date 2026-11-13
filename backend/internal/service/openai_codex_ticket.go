@@ -42,6 +42,9 @@ const (
 var ErrOpenAICodexTicketUnavailable = errors.New("codex turn-state ticket unavailable")
 
 type openAICodexTicket struct {
+	Acquisition         string             `json:"acquisition,omitempty"`
+	SourceAccountID     int64              `json:"source_account_id,omitempty"`
+	ProbeVerified       bool               `json:"probe_verified,omitempty"`
 	AccountID           int64              `json:"account_id"`
 	Model               string             `json:"model"`
 	State               string             `json:"state"`
@@ -503,6 +506,9 @@ func (t *openAICodexTicket) valid(now time.Time, targetLen int) bool {
 		return false
 	}
 	if t.Length == 780 {
+		if !t.ProbeVerified {
+			return false
+		}
 		shape, err := parseOpenAICodexTicketShape(t.State)
 		if err != nil || shape.IssuedAt.After(now.Add(30*time.Second)) || !now.Before(shape.IssuedAt.Add(openAICodexCredentialTTL)) || (t.Transport != "sse" && t.Transport != "websocket") || !codexTicketCookiesFresh(t, now) {
 			return false
@@ -549,13 +555,23 @@ func ticketIdentity(account *Account) string {
 	if account == nil {
 		return ""
 	}
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(account.GetCredential("chatgpt_account_id")+"\x00"+account.GetCredential("email"))))
+	identity := account.GetCredential("chatgpt_account_id") + "\x00" + account.GetCredential("email")
+	if account.AuthConnectionID != "" {
+		identity += fmt.Sprintf("\x00connection:%s/client:%s/revision:%d", account.AuthConnectionID, account.GetCredential("client_id"), account.AuthConnectionRevision)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))
 }
 func ticketIdentityMatches(account *Account, ticket *openAICodexTicket) bool {
+	if account != nil && account.AuthConnectionID != "" {
+		return ticket != nil && ticket.Identity != "" && ticket.Identity == ticketIdentity(account)
+	}
 	return ticket != nil && (ticket.Identity == "" || ticket.Identity == ticketIdentity(account))
 }
 
 func (s *OpenAIGatewayService) lookupCodexTicketLocked(account *Account, model string) *openAICodexTicket {
+	if account != nil && (account.AuthConnectionID != "" || account.HasManagedOpenAIConnections()) {
+		return nil
+	}
 	if s == nil || account == nil || account.ID <= 0 {
 		return nil
 	}
@@ -580,14 +596,10 @@ func (s *OpenAIGatewayService) lookupCodexTicketLocked(account *Account, model s
 		if protocol == "" {
 			protocol = "sse"
 		}
-		gateway := controls.TargetGateway
-		if gateway == "" {
-			gateway = "unified-88"
-		}
-		if mem != nil && (mem.Transport != protocol || !codex780GatewayAllowed(mem.Gateway, gateway)) {
+		if mem != nil && mem.Transport != protocol {
 			mem = nil
 		}
-		if extra != nil && (extra.Transport != protocol || !codex780GatewayAllowed(extra.Gateway, gateway)) {
+		if extra != nil && extra.Transport != protocol {
 			extra = nil
 		}
 	}
@@ -653,8 +665,14 @@ func parseOpenAICodexTicketFromAny(accountID int64, model string, raw any) *open
 }
 
 func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, account *Account, ticket *openAICodexTicket) error {
+	if account != nil && (account.AuthConnectionID != "" || account.HasManagedOpenAIConnections()) {
+		return errors.New("managed authorization cannot inherit account ticket or harvest state")
+	}
 	if s == nil || account == nil || ticket == nil || account.ID <= 0 {
 		return errors.New("invalid ticket store input")
+	}
+	if ticket.Length == 780 && !ticket.valid(time.Now(), 780) {
+		return errors.New("ticket probe validation required before storage")
 	}
 	incoming := *ticket
 	standby := false
@@ -737,6 +755,11 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 	if model == "" || !s.openAICodexTicketGatedModel(model) {
 		return nil
 	}
+	if account.AuthConnectionID != "" {
+		h.Del("Cookie")
+		h.Del(openAICodexTurnStateHeader)
+		return ErrOpenAICodexTicketUnavailable
+	}
 	cfg := s.openAICodexTicketConfig()
 	if !openAICodexSkipHarvest(account) && cfg.FailClosed && s.openAICodexTicketHarvestExcluded(account) {
 		return denyOpenAITicket()
@@ -810,6 +833,9 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
 // 不是客户端原始模型：注入侧读的是出站 body.model，两侧口径必须一致。
 func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, outboundModel string) bool {
+	if account.isPrismBrowserUpstreamModelEnabled(outboundModel) {
+		return false
+	}
 	if s == nil || !isOpenAICodexTicketAccount(account, outboundModel) || !s.openAICodexTicketEnabled() {
 		return false
 	}
@@ -1053,7 +1079,7 @@ func needsOpenAICodexAstraVersion(model string) bool {
 }
 
 func (s *OpenAIGatewayService) StartOpenAICodexTicketHarvester() {
-	if s == nil {
+	if s == nil || !s.cfg.RunsBackgroundJobs() {
 		return
 	}
 	s.openaiCodexTicketLifecycleMu.Lock()
@@ -1067,11 +1093,13 @@ func (s *OpenAIGatewayService) StartOpenAICodexTicketHarvester() {
 	s.openaiCodexTicketDone = done
 	go func() {
 		defer close(done)
+		coverageDone := make(chan struct{})
+		go func() { defer close(coverageDone); s.harvestCoverageLoop(ctx) }()
+		defer func() { cancel(); <-coverageDone }()
 		s.openAICodexTicketHarvestLoop(ctx)
 	}()
 	logger.L().Info("openai_codex_ticket harvester started",
 		zap.Int("ttl_seconds", s.openAICodexTicketConfig().TTLSeconds),
-		zap.Int("target_length", s.openAICodexTicketConfig().TargetLength),
 		zap.Strings("models", s.openAICodexTicketConfig().Models),
 	)
 }
@@ -1197,7 +1225,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	tiers := map[codexHarvestTier][]Account{}
 	seen := make(map[int64]bool, len(accounts))
 	for _, account := range accounts {
-		if seen[account.ID] || openAICodexSkipHarvest(&account) || !scope.includes(&account) || !scope.allowsAccount(&account) || !isOpenAICodexTicketAccount(&account) {
+		if account.HasManagedOpenAIConnections() || seen[account.ID] || openAICodexSkipHarvest(&account) || !scope.includes(&account) || !scope.allowsAccount(&account) || !isOpenAICodexTicketAccount(&account) {
 			continue
 		}
 		seen[account.ID] = true
@@ -1308,12 +1336,12 @@ func IsOpenAICodexTicketExtraKey(key string) bool {
 func MergeOpenAICodexTicketExtra(extra, current map[string]any) map[string]any {
 	result := maps.Clone(extra)
 	for key := range result {
-		if IsOpenAICodexTicketExtraKey(key) {
+		if IsOpenAICodexTicketExtraKey(key) || key == ExcelBPSCredentialStateExtraKey {
 			delete(result, key)
 		}
 	}
 	for key, value := range current {
-		if IsOpenAICodexTicketExtraKey(key) {
+		if IsOpenAICodexTicketExtraKey(key) || key == ExcelBPSCredentialStateExtraKey {
 			if result == nil {
 				result = make(map[string]any)
 			}
@@ -1389,6 +1417,9 @@ func IsMaskedProxyURL(raw string) bool {
 // Credential shadows do not own tickets. Keep their existing forwarding policy
 // instead of imposing a gate for a key the harvester never populates.
 func isOpenAICodexTicketAccount(account *Account, upstreamModels ...string) bool {
+	if account.IsSIWCEnabled() {
+		return false
+	}
 	if account == nil || !account.IsOpenAIOAuthLike() || account.IsShadow() || account.isExcelBPSAllModelsEnabled() {
 		return false
 	}

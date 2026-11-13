@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"net/http"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -53,8 +55,8 @@ func buildOpenAIResponsesURL(base string) string {
 }
 
 // buildOpenAIResponsesURLForPlatform 组装 Responses 端点（平台感知）。
-// DeepSeek 官方 Responses 端点为 /responses（无 /v1 前缀，适配 Codex）；
-// 其余平台维持 /v1/responses。
+// 供应商 profile 声明了 ResponsesPath 时按其拼接（如 DeepSeek 为无 /v1 前缀的
+// /responses）；其余平台维持 /v1/responses。
 //
 // 第三方 DeepSeek 兼容上游（聚合站/自建 relay）不统一：有的与官方一样在根路径
 // 提供 /responses，有的只提供 /v1/responses。因此在 base_url 上显式带上版本号
@@ -62,8 +64,8 @@ func buildOpenAIResponsesURL(base string) string {
 // /v1，直接得到 /v1/responses；base 写成 .../responses 时也不再追加路径。
 // 多协议账号用 credentials.api_base_urls.responses 指定该地址即可。
 func buildOpenAIResponsesURLForPlatform(platform string, base string) string {
-	if platform == PlatformDeepseek {
-		return buildOpenAIEndpointURL(base, "/responses")
+	if profile := LookupProviderProfile(platform); profile != nil && profile.ResponsesPath != "" {
+		return buildOpenAIEndpointURL(base, profile.ResponsesPath)
 	}
 	return buildOpenAIResponsesURL(base)
 }
@@ -71,6 +73,9 @@ func buildOpenAIResponsesURLForPlatform(platform string, base string) string {
 func shouldPreserveOpenAIResponsesNoneReasoningEffort(account *Account) bool {
 	if account == nil {
 		return false
+	}
+	if account.Platform == PlatformMistral {
+		return true
 	}
 	if account.IsOpenAIPassthroughEnabled() {
 		return true
@@ -138,15 +143,14 @@ func deleteOpenAIResponsesNoneReasoningEffortFromObject(account *Account, body m
 // 强制 store=false 并清除 previous_response_id（DeepSeek / Kimi 官方
 // Responses 均不支持服务端状态存储，携带这些字段会被拒绝）。
 //
-// DeepSeek 另需把 Codex/OpenAI 的 input_image.image_url 写成线上 serde
-// 要求的 url 字段；openai 平台但 base_url 指向 api.deepseek.com 的映射
-// 账号同样走这条出站改写（Codex 贴图会 422 missing field url）。
+// DeepSeek 另需把兼容格式的图片输入归一化为官方 image_url 字段；openai
+// 平台但 base_url 指向 api.deepseek.com 的映射账号同样走这条出站改写。
 // 非 CN / 非 DeepSeek 上游原样返回。
 func normalizeDeepSeekResponsesRequestBody(account *Account, body []byte) []byte {
 	if account == nil {
 		return body
 	}
-	applyStateless := account.UsesNativeCNResponses()
+	applyStateless := account.UsesNativeCNResponses() && !account.QwenSessionCacheEnabled()
 	applyImages := shouldAliasDeepSeekResponsesInputImages(account)
 	if !applyStateless && !applyImages {
 		return body
@@ -180,7 +184,7 @@ func normalizeDeepSeekResponsesRequestBody(account *Account, body []byte) []byte
 		changed = true
 	}
 	if applyImages {
-		if aliased, aliasedChanged := aliasDeepSeekResponsesInputImages(input); aliasedChanged {
+		if aliased, aliasedChanged := aliasDeepSeekResponsesInputImages(input, deepSeekResponsesImageField(account)); aliasedChanged {
 			requestBody["input"] = aliased
 			changed = true
 		}
@@ -195,15 +199,26 @@ func normalizeDeepSeekResponsesRequestBody(account *Account, body []byte) []byte
 	return rebuilt
 }
 
+// DeepSeekResponsesImageFieldCredential selects a wire schema, not a retry.
+// The default uses the current image_url schema. Legacy url-required providers
+// can opt in to url; the adapter never sends both or probes with a paid replay.
+const DeepSeekResponsesImageFieldCredential = "deepseek_responses_image_field"
+
+func deepSeekResponsesImageField(account *Account) string {
+	if account != nil && strings.EqualFold(strings.TrimSpace(account.GetCredential(DeepSeekResponsesImageFieldCredential)), "url") {
+		return "url"
+	}
+	return "image_url"
+}
+
 func shouldAliasDeepSeekResponsesInputImages(account *Account) bool {
 	return account != nil && (account.Platform == PlatformDeepseek || isDeepSeekAPIHost(account.GetOpenAIBaseURL()))
 }
 
-// aliasDeepSeekResponsesInputImages 把图片 part 改写成 DeepSeek 能反序列化
-// 的形状：type=input_image，同时带字符串字段 image_url 与 url。
-// 文档与部分 400 提 image_url；线上 serde 要求 url。只发其中一个都会踩坑。
-// 仅有 file_id、没有可用 URL 的 part 原样保留。
-func aliasDeepSeekResponsesInputImages(input any) (any, bool) {
+// aliasDeepSeekResponsesInputImages 把图片 part 改写成 DeepSeek 官方形状：
+// type=input_image，只保留明确协议分支选择的 URL 字段。仅有 file_id、没有可用
+// URL 的 part 原样保留。
+func aliasDeepSeekResponsesInputImages(input any, imageField string) (any, bool) {
 	items, ok := asDeepSeekResponsesSlice(input)
 	if !ok {
 		return input, false
@@ -214,7 +229,7 @@ func aliasDeepSeekResponsesInputImages(input any) (any, bool) {
 		if !ok {
 			continue
 		}
-		if aliasDeepSeekResponsesInputItem(item) {
+		if aliasDeepSeekResponsesInputItem(item, imageField) {
 			items[i] = item
 			changed = true
 		}
@@ -225,16 +240,16 @@ func aliasDeepSeekResponsesInputImages(input any) (any, bool) {
 	return items, true
 }
 
-func aliasDeepSeekResponsesInputItem(item map[string]any) bool {
-	changed := aliasDeepSeekResponsesImagePart(item)
+func aliasDeepSeekResponsesInputItem(item map[string]any, imageField string) bool {
+	changed := aliasDeepSeekResponsesImagePart(item, imageField)
 	if content, exists := item["content"]; exists {
-		if rewritten, did := aliasDeepSeekResponsesContent(content); did {
+		if rewritten, did := aliasDeepSeekResponsesContent(content, imageField); did {
 			item["content"] = rewritten
 			changed = true
 		}
 	}
 	if output, exists := item["output"]; exists {
-		if rewritten, did := aliasDeepSeekResponsesContent(output); did {
+		if rewritten, did := aliasDeepSeekResponsesContent(output, imageField); did {
 			item["output"] = rewritten
 			changed = true
 		}
@@ -242,7 +257,7 @@ func aliasDeepSeekResponsesInputItem(item map[string]any) bool {
 	return changed
 }
 
-func aliasDeepSeekResponsesContent(content any) (any, bool) {
+func aliasDeepSeekResponsesContent(content any, imageField string) (any, bool) {
 	parts, ok := asDeepSeekResponsesSlice(content)
 	if !ok {
 		return content, false
@@ -253,7 +268,7 @@ func aliasDeepSeekResponsesContent(content any) (any, bool) {
 		if !ok {
 			continue
 		}
-		if aliasDeepSeekResponsesImagePart(part) {
+		if aliasDeepSeekResponsesImagePart(part, imageField) {
 			parts[i] = part
 			changed = true
 		}
@@ -264,7 +279,7 @@ func aliasDeepSeekResponsesContent(content any) (any, bool) {
 	return parts, true
 }
 
-func aliasDeepSeekResponsesImagePart(part map[string]any) bool {
+func aliasDeepSeekResponsesImagePart(part map[string]any, imageField string) bool {
 	partType := strings.TrimSpace(stringValue(part["type"]))
 	switch partType {
 	case "input_image", "image_url", "image":
@@ -280,22 +295,28 @@ func aliasDeepSeekResponsesImagePart(part map[string]any) bool {
 		part["type"] = "input_image"
 		changed = true
 	}
-	if current, ok := part["image_url"].(string); !ok || strings.TrimSpace(current) != imageURL {
-		part["image_url"] = imageURL
+	if current, ok := part[imageField].(string); !ok || strings.TrimSpace(current) != imageURL {
+		part[imageField] = imageURL
 		changed = true
 	}
-	if current, ok := part["url"].(string); !ok || strings.TrimSpace(current) != imageURL {
-		part["url"] = imageURL
-		changed = true
+	// Exactly one URL field crosses the adapter boundary. Converted source/image
+	// aliases also contain the bitmap and must not duplicate the selected payload.
+	for _, key := range []string{"url", "image_url", "image", "source"} {
+		if key != imageField {
+			if _, exists := part[key]; exists {
+				delete(part, key)
+				changed = true
+			}
+		}
 	}
 	return changed
 }
 
 func extractDeepSeekResponsesImageURL(part map[string]any) string {
-	if imageURL := deepSeekResponsesURLValue(part["url"]); imageURL != "" {
+	if imageURL := deepSeekResponsesURLValue(part["image_url"]); imageURL != "" {
 		return imageURL
 	}
-	if imageURL := deepSeekResponsesURLValue(part["image_url"]); imageURL != "" {
+	if imageURL := deepSeekResponsesURLValue(part["url"]); imageURL != "" {
 		return imageURL
 	}
 	if imageURL := deepSeekResponsesURLValue(part["image"]); imageURL != "" {
@@ -1352,7 +1373,7 @@ func normalizeOpenAIOAuthResponsesCompatibilityBody(body []byte) ([]byte, bool, 
 }
 
 func normalizeGPT6ResponsesSampling(body []byte, model string) ([]byte, bool, error) {
-	if !openai.IsGPT6SolOrLunaModelSpelling(model) || gjson.GetBytes(body, "reasoning.effort").String() == "none" {
+	if (!openai.IsGPT6SolOrLunaModelSpelling(model) && !openai.IsGPT61SolModelSpelling(model)) || gjson.GetBytes(body, "reasoning.effort").String() == "none" {
 		return body, false, nil
 	}
 	out := body
@@ -1449,6 +1470,23 @@ func normalizeOpenAIResponseFormatSchemasBody(body []byte) ([]byte, bool, error)
 }
 
 func normalizeOpenAIResponsesWebSocketCompatibilityBody(body []byte, account *Account, responsesLite bool) ([]byte, bool, error) {
+	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{ResponsesLite: responsesLite})
+}
+
+func normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(cfg *config.Config, body []byte, account *Account, responsesLite bool) ([]byte, bool, error) {
+	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{Config: cfg, ResponsesLite: responsesLite})
+}
+
+type openAIResponsesCompatibilityOptions struct {
+	Config        *config.Config
+	ResponsesLite bool
+	// Compact marks the /responses/compact wire shape, which is left as-is
+	// by request-shape compatibility rewrites such as web_search history.
+	Compact bool
+}
+
+func normalizeOpenAIResponsesCompatibilityBodyWithOptions(body []byte, account *Account, opts openAIResponsesCompatibilityOptions) ([]byte, bool, error) {
+	responsesLite := opts.ResponsesLite
 	if account == nil || !account.IsOpenAI() {
 		return body, false, nil
 	}
@@ -1456,7 +1494,7 @@ func normalizeOpenAIResponsesWebSocketCompatibilityBody(body []byte, account *Ac
 	changed := false
 	if account.IsOpenAIOAuthLike() {
 		var err error
-		normalized, changed, err = normalizeOpenAIResponsesLegacyIngress(body)
+		normalized, changed, err = normalizeOpenAIResponsesLegacyIngressWithConfig(opts.Config, body)
 		if err != nil {
 			return body, false, err
 		}
@@ -1513,9 +1551,17 @@ func normalizeOpenAIResponsesWebSocketCompatibilityBody(body []byte, account *Ac
 			normalized = next
 			changed = true
 		}
+		if !opts.Compact {
+			webSearchBody, webSearchChanged, err := ensureOpenAIOAuthWebSearchToolForHistoryBody(normalized, responsesLite)
+			if err != nil {
+				return body, false, fmt.Errorf("normalize websocket body: %w", err)
+			}
+			normalized = webSearchBody
+			changed = changed || webSearchChanged
+		}
 	}
 	needsOrphanCleanup := account != nil && account.IsOpenAIOAuthLike() &&
-		gjson.GetBytes(normalized, "input").IsArray()
+		gjson.GetBytes(normalized, "input").IsArray() && openAIResponsesMayNeedOrphanCleanup(normalized)
 	if needsOrphanCleanup || openAIResponsesInputMayNeedTruncation(normalized) {
 		var reqBody map[string]any
 		if err := decodeOpenAIJSONUseNumber(normalized, &reqBody); err != nil {
@@ -2585,7 +2631,7 @@ func supportsOpenAIReasoningEffortMax(model string) bool {
 	case strings.HasPrefix(normalized, "deepseek-v4"), strings.HasPrefix(normalized, "deepseek-flash"):
 		// deepseek-flash（= DeepSeek-V4.1-Flash）与 v4 系同为 low/high/max 档位。
 		return true
-	case strings.HasPrefix(normalized, "glm-"):
+	case strings.HasPrefix(normalized, "glm-"), normalized == "zai-glm-5-3", normalized == "zai-glm-5-3-flash":
 		return true
 	case strings.HasPrefix(normalized, "kimi-"), strings.HasPrefix(normalized, "moonshot-"):
 		return true
@@ -2594,4 +2640,34 @@ func supportsOpenAIReasoningEffortMax(model string) bool {
 	default:
 		return false
 	}
+}
+
+// validateGPT61CompatRequest validates the converted request after model
+// mapping and reasoning effort policy application.
+func validateGPT61CompatRequest(body []byte, model string) error {
+	if err := validateGPT61RawEffort(body, model); err != nil {
+		return err
+	}
+	if gjson.GetBytes(body, "thinking.type").String() == "disabled" {
+		return openai.ValidateGPT61ReasoningEffort(model, "none")
+	}
+	return nil
+}
+
+func validateGPT61RawEffort(body []byte, model string) error {
+	if !openai.IsGPT61SolModelSpelling(model) && !openai.IsGPT61TerraModelSpelling(model) {
+		return nil
+	}
+	for _, path := range []string{"reasoning.effort", "reasoning_effort", "output_config.effort"} {
+		if err := openai.ValidateGPT61ReasoningEffort(model, gjson.GetBytes(body, path).String()); err != nil {
+			return err
+		}
+	}
+	requestedModel := openai.CanonicalizeOpenAIModelAliasSpelling(gjson.GetBytes(body, "model").String())
+	for _, effort := range []string{"none", "minimal"} {
+		if strings.HasSuffix(strings.ToLower(requestedModel), "-"+effort) {
+			return openai.ValidateGPT61ReasoningEffort(model, effort)
+		}
+	}
+	return nil
 }

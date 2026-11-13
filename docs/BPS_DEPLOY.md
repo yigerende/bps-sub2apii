@@ -1,7 +1,7 @@
 # bps-sub2api 部署
 
 本项目基于 `ranxi2001/sub2api` 的 `production` 分支，保留原有请求转发、账号调度、计费和 BPS 功能。
-当前已同步至上游发布版本 **v2.9.1**，对应提交 `ca5dd3cf5299df8778cdfa752430253ad4e071e8`（2026-09-28）。
+当前已同步至上游 `production` 最新提交，版本号 **v2.21.1**，提交为 `ff23a988f4c5825ec06a7efb4e0f16f2b1e65ced`（2026-11-13）。
 代码仓库：<https://github.com/yigerende/bps-sub2apii>。项目和 Docker 镜像名称为 `bps-sub2api`，仓库地址末尾有两个 `i`。
 
 ## 与已有 sub2api 并行部署

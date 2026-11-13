@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"io"
 	"log/slog"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -135,8 +137,9 @@ type UpstreamBillingProbeResult struct {
 // account table's background refresh. It intentionally excludes credentials,
 // runtime counters, and usage data from the response.
 type UpstreamBillingRateSnapshotItem struct {
-	AccountID int64                         `json:"account_id"`
-	Snapshot  *UpstreamBillingProbeSnapshot `json:"snapshot"`
+	CostMultiplier float64                       `json:"cost_multiplier"`
+	AccountID      int64                         `json:"account_id"`
+	Snapshot       *UpstreamBillingProbeSnapshot `json:"snapshot"`
 }
 
 // BuildUpstreamBillingRateSnapshotItems projects account rows into the
@@ -153,8 +156,9 @@ func BuildUpstreamBillingRateSnapshotItems(accounts []Account) []UpstreamBilling
 			snapshot = decodeUpstreamBillingProbeSnapshot(account.Extra)
 		}
 		items = append(items, UpstreamBillingRateSnapshotItem{
-			AccountID: account.ID,
-			Snapshot:  snapshot,
+			AccountID:      account.ID,
+			CostMultiplier: account.CostMultiplier(),
+			Snapshot:       snapshot,
 		})
 	}
 	return items
@@ -241,6 +245,9 @@ func normalizeUpstreamBillingProbeSettings(settings *UpstreamBillingProbeSetting
 
 // UpstreamBillingProbeService discovers a remote Sub2API billing snapshot.
 type UpstreamBillingProbeService struct {
+	newAPIRepo         NewAPIAuthorizationRepository
+	newAPIEncryptor    SecretEncryptor
+	newAPIFixedKey     bool
 	accountRepo        AccountRepository
 	accountTestService *AccountTestService
 	settingService     *SettingService
@@ -301,10 +308,14 @@ func ProvideUpstreamBillingProbeService(
 	settingService *SettingService,
 	lockCache LeaderLockCache,
 	db *sql.DB,
+	cfg *config.Config,
+	newAPIRepo NewAPIAuthorizationRepository,
+	encryptor SecretEncryptor,
 ) *UpstreamBillingProbeService {
 	svc := NewUpstreamBillingProbeService(accountRepo, accountTestService, settingService)
 	svc.SetLeaderLock(lockCache, db)
-	svc.Start()
+	svc.SetNewAPIAuthorization(newAPIRepo, encryptor, cfg != nil && cfg.Totp.EncryptionKeyConfigured)
+	startBackgroundService(cfg, svc)
 	return svc
 }
 
@@ -619,6 +630,15 @@ func (s *UpstreamBillingProbeService) SetAccountEnabled(ctx context.Context, acc
 
 func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, account *Account, intervalMinutes int) (*UpstreamBillingProbeSnapshot, error) {
 	now := s.currentTime().UTC()
+	if s.newAPIRepo != nil {
+		binding, err := s.newAPIRepo.GetBinding(ctx, account.ID)
+		if err != nil {
+			return nil, newAPIError("storage_unavailable")
+		}
+		if binding != nil && binding.Fingerprint == NewAPIAccountFingerprint(account) {
+			return s.probeNewAPIAccount(ctx, account, binding, intervalMinutes)
+		}
+	}
 	if s.accountTestService == nil || s.accountTestService.httpUpstream == nil {
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "transport_unavailable", 0)
 	}
@@ -629,7 +649,7 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "missing_api_key", 0)
 	}
 	baseURL := account.GetCredential("base_url")
-	if account.IsCNProvider() && account.IsAdaptiveAPIProtocol() {
+	if account.RoutesProtocolByInbound() && account.IsAdaptiveAPIProtocol() {
 		baseURL = account.GetCNProtocolBaseURL(APIProtocolChatCompletions)
 	}
 	if account.Platform == PlatformOpenAI {
@@ -678,7 +698,7 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 	if err := s.updateSnapshot(ctx, account, snapshot, syncRate); err != nil {
 		return nil, err
 	}
-	if syncRate != nil {
+	if syncRate != nil && previousRate != *syncRate {
 		// 写回是后台任务的裸 SQL，不经过管理端路由，因此不会产生 audit_logs 行。
 		// old_rate_multiplier 是本次探测开始时读到的值（写回的 CAS 不比对该列）。
 		slog.Info("upstream_billing_rate_sync_applied",
@@ -803,7 +823,7 @@ func upstreamBillingRateSnapshotFromResult(
 	// 账号不因声明值不适配 accounts.rate_multiplier 而被记成探测失败并进入
 	// 指数退避——探测本身成功了，原始声明照常存进快照供展示。
 	var syncRate *float64
-	if upstreamBillingRateSyncEnabled(account) {
+	if upstreamBillingRateSyncEnabled(account) && data["billing_mode"] != "multi_group" {
 		if value, valid := upstreamBillingProbeSyncRate(data); valid {
 			syncRate = &value
 			snapshot.SyncedRateMultiplier = &value
@@ -894,6 +914,9 @@ func parseUpstreamBillingProbeResponse(body []byte) (map[string]any, error) {
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, err
 	}
+	if response.SchemaVersion == 2 {
+		return parseMultiGroupUpstreamBillingResponse(body)
+	}
 	if response.Object != "sub2api.key_billing" || response.SchemaVersion != 1 || response.BillingScope != "token" {
 		return nil, fmt.Errorf("unexpected billing response schema")
 	}
@@ -970,6 +993,9 @@ func parseUpstreamBillingProbeResponse(body []byte) (map[string]any, error) {
 }
 
 func upstreamBillingRateAt(data map[string]any, now time.Time) (float64, bool) {
+	if data["billing_mode"] == "multi_group" {
+		return 0, false
+	}
 	if scope, _ := data["billing_scope"].(string); scope != "token" {
 		return 0, false
 	}
@@ -1008,6 +1034,9 @@ func upstreamBillingRateAt(data map[string]any, now time.Time) (float64, bool) {
 // A rejected declaration leaves the current multiplier untouched; the probe
 // still records an OK snapshot carrying the raw declaration for display.
 func upstreamBillingProbeSyncRate(data map[string]any) (float64, bool) {
+	if data["billing_mode"] == "multi_group" {
+		return 0, false
+	}
 	value, ok := resolveAccountExtraNumber(data, "resolved_rate_multiplier")
 	if !ok || math.IsNaN(value) || math.IsInf(value, 0) {
 		return 0, false
@@ -1103,16 +1132,7 @@ func isUpstreamBillingProbeStatus(status string) bool {
 // type=apikey by the admin form, so only pre-existing type=upstream rows
 // cannot turn the probe on.
 func IsUpstreamBillingProbeIdentity(platform, accountType string) bool {
-	if accountType != AccountTypeAPIKey {
-		return false
-	}
-	switch platform {
-	case PlatformOpenAI, PlatformAnthropic, PlatformGemini, PlatformAntigravity, PlatformGrok,
-		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo:
-		return true
-	default:
-		return false
-	}
+	return accountType == AccountTypeAPIKey && domain.IsConcretePlatform(platform)
 }
 
 func isUpstreamBillingProbeAccount(account *Account) bool {
@@ -1147,6 +1167,10 @@ var upstreamBillingProbeOfficialAPIDomains = []string{
 	"bigmodel.cn",
 	"deepseek.com",
 	"opencode.ai",
+	"typesafe.ai",
+	"commandcode.ai",
+	"cline.bot",
+	"mistral.ai",
 }
 
 func upstreamBillingProbeTargetIsOfficialAPI(baseURL string) bool {
@@ -1198,6 +1222,12 @@ func (s *UpstreamBillingProbeService) currentTime() time.Time {
 }
 
 func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.Duration {
+	if retryAfterDuration < 0 {
+		retryAfterDuration = 0
+	}
+	if retryAfterDuration > upstreamBillingProbeMaxDelay {
+		retryAfterDuration = upstreamBillingProbeMaxDelay
+	}
 	interval := time.Duration(intervalMinutes) * time.Minute
 	if interval < upstreamBillingProbeMinIntervalMinutes*time.Minute {
 		interval = upstreamBillingProbeMinIntervalMinutes * time.Minute
@@ -1213,8 +1243,8 @@ func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.
 		interval += time.Duration(rand.Int64N(int64(jitterRange)*2+1)) - jitterRange
 	}
 	if retryAfterDuration > interval {
-		// Retry-After is an explicit upstream instruction; do not shorten it
-		// with the local maximum delay.
+		// Retry-After is an explicit upstream instruction; honor it over the
+		// local backoff interval, clamped to the same 24h ceiling.
 		return retryAfterDuration
 	}
 	if interval > upstreamBillingProbeMaxDelay {
@@ -1226,8 +1256,7 @@ func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.
 // unsupportedProbeDelay 拉长 unsupported 账号的重探间隔，让无效候选自然退出
 // 热队列，不再和真正接入 sub2api 的中转账号抢每周期的探测名额。
 // 仍按 upstreamBillingProbeMaxDelay 封顶，保证上游后来接入 sub2api 时最迟一天
-// 内会被重新发现；base 本身已达上限（例如 Retry-After 明确要求更久）时原样返回，
-// 不缩短上游指令。
+// 内会被重新发现；base 本身亦受 24h 封顶保护。
 func unsupportedProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.Duration {
 	base := nextProbeDelay(intervalMinutes, retryAfterDuration)
 	if base >= upstreamBillingProbeMaxDelay {

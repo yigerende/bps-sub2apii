@@ -1,5 +1,16 @@
 export default {
   common: {
+    qwenPlatformHint: 'Qwen uses OpenAI-compatible APIs with separate platform statistics. Existing OpenAI accounts and groups are not migrated automatically.',
+    qwenCache: {
+      title: 'Qwen cache and sessions',
+      enable: 'Enable official Responses session cache',
+      cacheHint: 'Uses Responses forwarding with upstream session caching. Clients must continue with previous_response_id. Cache writes may be billed; actual usage determines hits. Disabling restores the configured protocol.',
+      strict: 'Keep strict session affinity',
+      strictHint: 'Requires a stable session_id or prompt_cache_key. Sessions stay on one account, wait at capacity, and return errors after retries instead of switching channels. Assignment can change after the binding expires.',
+      tokenPlan: 'Use Token Plan endpoint',
+      payg: 'Use official pay-as-you-go endpoint',
+      endpointHint: 'These buttons replace the current endpoint. The API key must match its plan endpoint. Existing OpenAI accounts are not migrated automatically.'
+    },
     loading: 'Loading...',
     submitting: 'Submitting...',
     justNow: 'just now',
@@ -22,6 +33,15 @@ export default {
     confirm: 'Confirm',
     reset: 'Reset',
     search: 'Search',
+    featureSearch: {
+      title: 'Find a feature',
+      placeholder: 'Search features or keywords…',
+      resultCount: '{count} available features',
+      noResults: 'No matching features. Try another name or keyword.',
+      hint: '↑ ↓ Select · Enter Open · Esc Close'
+    },
+    newFeature: 'New feature',
+    dismissNewFeature: 'Hide this new feature notice',
     filter: 'Filter',
     export: 'Export',
     import: 'Import',
@@ -38,6 +58,9 @@ export default {
     all: 'All',
     none: 'None',
     selectAll: 'Select all',
+    sort: 'Sort',
+    sortAscending: 'Sort ascending',
+    sortDescending: 'Sort descending',
     noData: 'No data',
     expand: 'Expand',
     collapse: 'Collapse',
@@ -52,6 +75,8 @@ export default {
     close: 'Close',
     toggleMenu: 'Toggle menu',
     userMenu: 'User menu',
+    userId: 'User ID',
+    copyUserId: 'Copy user ID: {id}',
     pageNotFound: 'Page not found',
     enabled: 'Enabled',
     disabled: 'Disabled',
@@ -211,6 +236,7 @@ export default {
     channelMonitor: 'Channel Monitor',
     channelStatus: 'Channel Status',
     pelicanShowcase: 'Pelican Showcase',
+    supportTickets: 'Support Tickets',
     riskControl: 'Risk Control',
     securityAudit: 'Security Audit',
     contentModeration: 'Content Moderation',
@@ -254,6 +280,7 @@ export default {
     registrationFailed: 'Registration failed. Please try again.',
     emailDomainRegistrationLimit:
       'This email domain cannot register another account. Please use a mainstream email, or contact support to add your enterprise domain to the allowlist.',
+    emailAliasNotAllowed: 'Email aliases cannot register. Remove dots from Gmail usernames, +tags, or trailing domain dots and try again.',
     emailSuffixNotAllowed: 'This email domain is not allowed for registration.',
     emailSuffixNotAllowedWithAllowed:
       'This email domain is not allowed. Allowed domains: {suffixes}',

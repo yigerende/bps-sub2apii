@@ -149,6 +149,10 @@ func (s *refreshTokenCacheStub) DeleteTokenFamily(context.Context, string) error
 	return nil
 }
 
+func (s *refreshTokenCacheStub) ConsumeRefreshToken(context.Context, string) (*RefreshTokenData, error) {
+	return nil, ErrRefreshTokenNotFound
+}
+
 func (s *refreshTokenCacheStub) AddToUserTokenSet(context.Context, int64, string, time.Duration) error {
 	return nil
 }
@@ -388,7 +392,8 @@ func TestAuthService_Register_EmailExists(t *testing.T) {
 func TestAuthService_Register_AliasDuplicateRejected(t *testing.T) {
 	repo := &userRepoStub{aliasExists: true}
 	service := newAuthService(repo, map[string]string{
-		SettingKeyRegistrationEnabled: "true",
+		SettingKeyRegistrationEnabled:                "true",
+		SettingKeyRegistrationEmailAliasBlockEnabled: "false",
 	}, nil, nil)
 
 	_, _, err := service.Register(context.Background(), "some.one+bulk294@gmail.com", "password")
@@ -605,6 +610,18 @@ func TestAuthService_Register_CreateError(t *testing.T) {
 
 	_, _, err := service.Register(context.Background(), "user@test.com", "password")
 	require.ErrorIs(t, err, ErrServiceUnavailable)
+}
+
+func TestAuthService_Register_IPQuotaErrorIsPreserved(t *testing.T) {
+	repo := &userRepoStub{createErr: ErrRegistrationIPLimit}
+	svc := newAuthService(repo, map[string]string{
+		SettingKeyRegistrationEnabled: "true",
+	}, nil, nil)
+
+	token, user, err := svc.Register(context.Background(), "user@example.com", "password")
+	require.ErrorIs(t, err, ErrRegistrationIPLimit)
+	require.Empty(t, token)
+	require.Nil(t, user)
 }
 
 func TestAuthService_Register_CreateEmailExistsRace(t *testing.T) {
@@ -1009,4 +1026,20 @@ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func (s *emailCacheStub) IncrVerificationCodeAttempts(context.Context, string) (int, error) {
+	if s.data == nil {
+		return 0, errors.New("verification code not found")
+	}
+	s.data.Attempts++
+	return s.data.Attempts, nil
+}
+
+func (s *emailCacheStub) IncrNotifyVerifyCodeAttempts(context.Context, string) (int, error) {
+	return 0, errors.New("notify verification code not found")
+}
+
+func (s *emailCacheStub) ConsumePasswordResetToken(context.Context, string, string) (bool, error) {
+	return false, nil
 }

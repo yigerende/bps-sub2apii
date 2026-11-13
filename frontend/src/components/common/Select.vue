@@ -165,6 +165,7 @@ interface Props {
 }
 
 interface Emits {
+  (e: 'open'): void
   (e: 'update:modelValue', value: any): void
   (e: 'change', value: any, option: SelectOption | null): void
   (e: 'search', query: string): void
@@ -396,8 +397,13 @@ const toggle = () => {
   isOpen.value = !isOpen.value
 }
 
+watch(() => props.disabled, (disabled) => {
+  if (disabled) isOpen.value = false
+})
+
 watch(isOpen, (open) => {
   if (open) {
+    emit('open')
     calculateDropdownPosition()
     // Reset focused index to current selection or first item
     if (filteredOptions.value.length === 0) {
@@ -473,6 +479,7 @@ const onTriggerKeyDown = () => {
 }
 
 const onDropdownKeyDown = (e: KeyboardEvent) => {
+  if (e.isComposing) return
   switch (e.key) {
     case 'ArrowDown':
       e.preventDefault()

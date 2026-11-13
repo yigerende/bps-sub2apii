@@ -72,14 +72,13 @@ const props = defineProps<{
   account: Account
 }>()
 
+const emit = defineEmits<{
+  probed: [result: CNProviderQuotaProbeResult]
+}>()
+
 const { t } = useI18n()
 
-const readMode = (): string => {
-  const mode = props.account.credentials?.account_mode
-  return typeof mode === 'string' ? mode : ''
-}
-
-const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode()))
+const visible = computed(() => cnQuotaCellVisible(props.account))
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -180,6 +179,7 @@ const handleProbe = async () => {
     // 失败时保留已渲染的快照条形图（仅显示错误行），成功才覆盖。
     if (result.success) {
       data.value = result
+      emit('probed', result)
     } else {
       error.value = result.error || t('common.error')
     }

@@ -15,6 +15,7 @@ import (
 const (
 	apiKeyRateLimitKeyPrefix   = "apikey:ratelimit:"
 	apiKeyRateLimitDuration    = 24 * time.Hour
+	apiKeyCreateCountKeyPrefix = "apikey:create_count:"
 	apiKeyAuthCachePrefix      = "apikey:auth:"
 	authCacheInvalidateChannel = "auth:cache:invalidate"
 )
@@ -22,6 +23,11 @@ const (
 // apiKeyRateLimitKey generates the Redis key for API key creation rate limiting.
 func apiKeyRateLimitKey(userID int64) string {
 	return fmt.Sprintf("%s%d", apiKeyRateLimitKeyPrefix, userID)
+}
+
+// apiKeyCreateCountKey generates the Redis key for per-user API key creation counting.
+func apiKeyCreateCountKey(userID int64) string {
+	return fmt.Sprintf("%s%d", apiKeyCreateCountKeyPrefix, userID)
 }
 
 func apiKeyAuthCacheKey(key string) string {
@@ -54,9 +60,23 @@ func (c *apiKeyCache) IncrementCreateAttemptCount(ctx context.Context, userID in
 	return err
 }
 
-func (c *apiKeyCache) DeleteCreateAttemptCount(ctx context.Context, userID int64) error {
-	key := apiKeyRateLimitKey(userID)
-	return c.rdb.Del(ctx, key).Err()
+// IncrementCreateCount atomically increments a fixed-window counter. Only a
+// missing TTL is repaired; later increments must not extend the window. Lua
+// preserves the INCR/expiry boundary without Redis 7's EXPIRE NX option.
+var incrementAPIKeyCreateCountScript = redis.NewScript(`
+local count = redis.call('INCR', KEYS[1])
+if redis.call('TTL', KEYS[1]) == -1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+`)
+
+func (c *apiKeyCache) IncrementCreateCount(ctx context.Context, userID int64, window time.Duration) (int64, error) {
+	seconds := int64(window / time.Second)
+	if window > 0 && seconds == 0 {
+		seconds = 1
+	}
+	return incrementAPIKeyCreateCountScript.Run(ctx, c.rdb, []string{apiKeyCreateCountKey(userID)}, seconds).Int64()
 }
 
 func (c *apiKeyCache) IncrementDailyUsage(ctx context.Context, apiKey string) error {
@@ -101,6 +121,10 @@ func (c *apiKeyCache) PublishAuthCacheInvalidation(ctx context.Context, cacheKey
 
 // SubscribeAuthCacheInvalidation subscribes to cache invalidation messages
 func (c *apiKeyCache) SubscribeAuthCacheInvalidation(ctx context.Context, handler func(cacheKey string)) error {
+	return c.subscribeAuthCacheInvalidation(ctx, handler, func() { service.NotifyAuthCacheSubscriptionReady(ctx) })
+}
+
+func (c *apiKeyCache) subscribeAuthCacheInvalidation(ctx context.Context, handler func(string), ready func()) error {
 	pubsub := c.rdb.Subscribe(ctx, authCacheInvalidateChannel)
 
 	// Verify subscription is working
@@ -115,19 +139,28 @@ func (c *apiKeyCache) SubscribeAuthCacheInvalidation(ctx context.Context, handle
 			log.Printf("Warning: failed to close auth cache invalidation pubsub: %v", err)
 		}
 	}()
-	service.NotifyAuthCacheSubscriptionReady(ctx)
+	ready()
 
-	ch := pubsub.Channel()
+	// The message-only channel hides automatic reconnects. Subscription events
+	// mark a recovery checkpoint at which consumers discard missed L1 grants.
+	ch := pubsub.ChannelWithSubscriptions()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case msg, ok := <-ch:
+		case event, ok := <-ch:
 			if !ok {
 				return errors.New("auth cache invalidation pubsub channel closed")
 			}
-			if msg != nil {
-				handler(msg.Payload)
+			switch message := event.(type) {
+			case *redis.Subscription:
+				if message.Kind == "subscribe" && message.Channel == authCacheInvalidateChannel {
+					ready()
+				}
+			case *redis.Message:
+				if message != nil {
+					handler(message.Payload)
+				}
 			}
 		}
 	}

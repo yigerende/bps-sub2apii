@@ -14,12 +14,12 @@ import (
 )
 
 // Pelican group tests ask a group the Pelican question on a schedule. For every sample
-// the gateway scheduler picks the account exactly as it would for a user request to the
-// group, so the showcase reflects the group rather than one hand-picked account.
+// the gateway scheduler picks an account from the group, additionally respecting any
+// configured account model allowlist so unselected models do not enter the showcase.
 
 const (
-	// PelicanGroupTestMaxAttempts bounds the accounts one sample may try: like a user
-	// request, a sample moves on only when the account fails before producing output.
+	// PelicanGroupTestMaxAttempts bounds the accounts one sample may try, including
+	// transient failures after partial output in this buffered background test.
 	PelicanGroupTestMaxAttempts = 3
 	pelicanGroupTestKeepResults = 100
 	pelicanGroupTestHistoryAge  = 7 * 24 * time.Hour
@@ -40,25 +40,29 @@ var (
 )
 
 type PelicanGroupTestPlan struct {
-	ID             int64              `json:"id"`
-	GroupID        int64              `json:"group_id"`
-	GroupName      string             `json:"group_name"`
-	GroupPlatform  string             `json:"group_platform"`
-	GroupStatus    string             `json:"group_status"`
-	ModelID        string             `json:"model_id"`
-	CronExpression string             `json:"cron_expression"`
-	Enabled        bool               `json:"enabled"`
-	PelicanConfig  *PelicanTestConfig `json:"pelican_config"`
-	LastRunAt      *time.Time         `json:"last_run_at"`
-	NextRunAt      *time.Time         `json:"next_run_at"`
-	RunningUntil   *time.Time         `json:"running_until,omitempty"`
+	ID                  int64              `json:"id"`
+	GroupID             int64              `json:"group_id"`
+	GroupName           string             `json:"group_name"`
+	TodayCostUSD        float64            `json:"today_cost_usd"`
+	TotalCostUSD        float64            `json:"total_cost_usd"`
+	TodayCostIncomplete bool               `json:"today_cost_incomplete"`
+	TotalCostIncomplete bool               `json:"total_cost_incomplete"`
+	GroupPlatform       string             `json:"group_platform"`
+	GroupStatus         string             `json:"group_status"`
+	ModelID             string             `json:"model_id"`
+	CronExpression      string             `json:"cron_expression"`
+	Enabled             bool               `json:"enabled"`
+	PelicanConfig       *PelicanTestConfig `json:"pelican_config"`
+	LastRunAt           *time.Time         `json:"last_run_at"`
+	NextRunAt           *time.Time         `json:"next_run_at"`
+	RunningUntil        *time.Time         `json:"running_until,omitempty"`
 	// LastResult is the newest result without its HTML, for the admin overview.
 	LastResult *PelicanGroupTestResult `json:"last_result,omitempty"`
 	CreatedAt  time.Time               `json:"created_at"`
 	UpdatedAt  time.Time               `json:"updated_at"`
 }
 
-// PelicanGroupTestAttempt is an account a sample left because it failed before any output.
+// PelicanGroupTestAttempt is an account a sample left after a retryable failure.
 type PelicanGroupTestAttempt struct {
 	AccountID   int64  `json:"account_id"`
 	AccountName string `json:"account_name"`
@@ -68,21 +72,23 @@ type PelicanGroupTestAttempt struct {
 // PelicanGroupTestResult is one sample. AccountID is the account that gave the final
 // answer (0 when the scheduler found none); only admins see it.
 type PelicanGroupTestResult struct {
-	ID            int64                     `json:"id"`
-	PlanID        int64                     `json:"plan_id"`
-	GroupID       int64                     `json:"group_id"`
-	GroupName     string                    `json:"group_name,omitempty"`
-	AccountID     int64                     `json:"account_id"`
-	AccountName   string                    `json:"account_name"`
-	Attempts      []PelicanGroupTestAttempt `json:"attempts"`
-	Status        string                    `json:"status"`
-	ResponseText  string                    `json:"response_text,omitempty"`
-	ErrorMessage  string                    `json:"error_message"`
-	LatencyMs     int64                     `json:"latency_ms"`
-	PelicanConfig *PelicanTestConfig        `json:"pelican_config,omitempty"`
-	StartedAt     time.Time                 `json:"started_at"`
-	FinishedAt    time.Time                 `json:"finished_at"`
-	CreatedAt     time.Time                 `json:"created_at"`
+	ID             int64                     `json:"id"`
+	PlanID         int64                     `json:"plan_id"`
+	GroupID        int64                     `json:"group_id"`
+	GroupName      string                    `json:"group_name,omitempty"`
+	AccountID      int64                     `json:"account_id"`
+	AccountName    string                    `json:"account_name"`
+	Attempts       []PelicanGroupTestAttempt `json:"attempts"`
+	Status         string                    `json:"status"`
+	ResponseText   string                    `json:"response_text,omitempty"`
+	ErrorMessage   string                    `json:"error_message"`
+	LatencyMs      int64                     `json:"latency_ms"`
+	CostUSD        *float64                  `json:"cost_usd"`
+	CostIncomplete bool                      `json:"cost_incomplete"`
+	PelicanConfig  *PelicanTestConfig        `json:"pelican_config,omitempty"`
+	StartedAt      time.Time                 `json:"started_at"`
+	FinishedAt     time.Time                 `json:"finished_at"`
+	CreatedAt      time.Time                 `json:"created_at"`
 }
 
 // PelicanGroupTestPlanInput is what an admin edits; the question is always the HTML drawing kind.
@@ -92,6 +98,7 @@ type PelicanGroupTestPlanInput struct {
 	CronExpression  string `json:"cron_expression"`
 	Enabled         bool   `json:"enabled"`
 	Prompt          string `json:"prompt"`
+	PromptMode      string `json:"prompt_mode,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort"`
 	ParallelCount   int    `json:"parallel_count"`
 }
@@ -143,6 +150,7 @@ type PelicanGroupTestService struct {
 	router     pelicanGroupRouter
 	runAccount func(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error)
 	showcase   *PelicanShowcaseService
+	billing    *BillingService
 	now        func() time.Time
 	// runs tracks background runs so tests can wait for them.
 	runs sync.WaitGroup
@@ -156,6 +164,7 @@ func NewPelicanGroupTestService(
 	concurrency *ConcurrencyService,
 	accountTest *AccountTestService,
 	showcase *PelicanShowcaseService,
+	billing *BillingService,
 ) *PelicanGroupTestService {
 	return &PelicanGroupTestService{
 		repo:       repo,
@@ -163,6 +172,7 @@ func NewPelicanGroupTestService(
 		router:     &gatewayPelicanGroupRouter{gateway: gateway, openai: openai, concurrency: concurrency, slotWait: pelicanGroupTestSlotWait},
 		runAccount: accountTest.RunPelicanBackground,
 		showcase:   showcase,
+		billing:    billing,
 		now:        time.Now,
 	}
 }
@@ -237,7 +247,7 @@ func (s *PelicanGroupTestService) planFromInput(ctx context.Context, input Pelic
 		return nil, infraerrors.BadRequest("INVALID_PELICAN_GROUP_TEST", "model is required (maximum 100 bytes)")
 	}
 	prompt := strings.TrimSpace(input.Prompt)
-	if prompt == "" || len(prompt) > 32000 {
+	if (prompt == "" && input.PromptMode != PelicanPromptModeRandom) || len(prompt) > 32000 {
 		return nil, infraerrors.BadRequest("INVALID_PELICAN_GROUP_TEST", "prompt is required (maximum 32000 bytes)")
 	}
 	effort := normalizePelicanReasoningEffort(input.ReasoningEffort)
@@ -261,7 +271,10 @@ func (s *PelicanGroupTestService) planFromInput(ctx context.Context, input Pelic
 	}
 	plan.NextRunAt = &next
 	plan.Enabled = input.Enabled
-	plan.PelicanConfig = &PelicanTestConfig{QuestionKind: "pelican", Prompt: prompt, ReasoningEffort: effort, ParallelCount: parallel, ModelID: plan.ModelID}
+	plan.PelicanConfig = &PelicanTestConfig{QuestionKind: "pelican", PromptMode: input.PromptMode, Prompt: prompt, ReasoningEffort: effort, ParallelCount: parallel, ModelID: plan.ModelID}
+	if err := validatePelicanPromptMode(plan.PelicanConfig); err != nil {
+		return nil, infraerrors.BadRequest("INVALID_PELICAN_GROUP_TEST", err.Error())
+	}
 	return plan, nil
 }
 
@@ -286,6 +299,7 @@ func (s *PelicanGroupTestService) RunNow(ctx context.Context, id int64) error {
 	if !claimed {
 		return ErrPelicanGroupTestPlanRunning
 	}
+	plan.PelicanConfig = freezePelicanQuestion(plan.PelicanConfig, "manual-group:"+now.UTC().Format(time.RFC3339Nano), nil)
 	s.runs.Add(1)
 	go func() {
 		defer s.runs.Done()
@@ -333,6 +347,10 @@ func (s *PelicanGroupTestService) runScheduled(ctx context.Context, plan *Pelica
 		logger.LegacyPrintf("service.pelican_group_test", "plan=%d invalid schedule: %v", plan.ID, err)
 		return
 	}
+	roundTime := now
+	if plan.NextRunAt != nil {
+		roundTime = *plan.NextRunAt
+	}
 	// The persisted lease keeps ticks and server replicas from running a plan twice and
 	// expires by itself after a crash.
 	until := now.Add(pelicanGroupTestLease).Truncate(time.Microsecond)
@@ -343,6 +361,7 @@ func (s *PelicanGroupTestService) runScheduled(ctx context.Context, plan *Pelica
 	if err != nil || !claimed {
 		return
 	}
+	plan.PelicanConfig = freezePelicanQuestion(plan.PelicanConfig, "scheduled:"+roundTime.UTC().Format(time.RFC3339Nano), nil)
 	s.execute(plan, until)
 }
 
@@ -400,12 +419,24 @@ func (s *PelicanGroupTestService) runSamples(ctx context.Context, plan *PelicanG
 	return results
 }
 
-// runSample routes one sample like a user request. It moves to another account only when
-// the account failed before producing any output, which is when a user request fails over
-// too; an answer that is not HTML is the group's real answer and is kept. Each sample runs
+// runSample uses the user-request scheduler, but buffers each answer before publishing.
+// A transient stream failure can therefore restart on another account even after partial
+// output; an answer that is not HTML is the group's real answer and is kept. Each sample runs
 // in its own goroutine outside Gin's recovery, so a panic becomes a failed result.
 func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGroupTestPlan, group *Group) (result *PelicanGroupTestResult) {
 	started := s.now()
+	var costUSD float64
+	priced, attempted, incomplete := false, false, false
+	defer func() {
+		if result != nil {
+			if priced || !attempted {
+				result.CostUSD = &costUSD
+			} else {
+				result.CostUSD = nil
+			}
+			result.CostIncomplete = incomplete || (attempted && !priced)
+		}
+	}()
 	defer func() {
 		if recover() != nil {
 			result = s.newResult(plan, started, s.now(), "pelican_group_test_panic: sample failed")
@@ -414,22 +445,34 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 	}()
 	excluded := make(map[int64]struct{})
 	attempts := []PelicanGroupTestAttempt{}
+	var lastSample *ScheduledTestResult
 	for {
 		route, err := s.router.route(ctx, group, plan.ModelID, excluded)
 		if err != nil {
 			if len(attempts) == 0 {
 				return s.newResult(plan, started, s.now(), fmt.Sprintf("no_available_account: %v", err))
 			}
-			// Nothing left to fail over to: the last account's error is what a user would get.
+			// Keep the final failed answer, including its partial output, if routing is exhausted.
 			last := attempts[len(attempts)-1]
 			result = s.newResult(plan, started, s.now(), last.Error)
 			result.AccountID, result.AccountName, result.Attempts = last.AccountID, last.AccountName, attempts[:len(attempts)-1]
+			result.ResponseText = lastSample.ResponseText
 			return result
 		}
 		var sample *ScheduledTestResult
+		attempted = true
+		usage := &pelicanTestUsageCollector{model: route.account.GetMappedModel(route.model)}
 		func() {
 			defer route.release()
-			sample, err = s.runAccount(ctx, route.account.ID, route.model, plan.PelicanConfig)
+			defer func() {
+				cost, partial := usage.cost(s.billing, route.account)
+				incomplete = incomplete || partial
+				if cost != nil {
+					costUSD += *cost
+					priced = true
+				}
+			}()
+			sample, err = s.runAccount(context.WithValue(ctx, pelicanTestUsageKey{}, usage), route.account.ID, route.model, plan.PelicanConfig)
 		}()
 		if err != nil || sample == nil {
 			sample = &ScheduledTestResult{Status: "failed", ErrorMessage: fmt.Sprint(err)}
@@ -437,15 +480,18 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 				sample.ErrorMessage = "pelican_group_test_empty_result: account test returned no result"
 			}
 		}
-		if sample.Status == "success" || !pelicanFailedBeforeOutput(sample) || len(attempts)+1 >= PelicanGroupTestMaxAttempts {
+		if ctx.Err() != nil || !pelicanGroupTestRetryable(sample) || len(attempts)+1 >= PelicanGroupTestMaxAttempts {
 			result = s.newResult(plan, started, s.now(), sample.ErrorMessage)
 			result.Status = sample.Status
 			result.ResponseText = sample.ResponseText
-			result.LatencyMs = sample.LatencyMs
+			if len(attempts) == 0 {
+				result.LatencyMs = sample.LatencyMs
+			}
 			result.AccountID, result.AccountName, result.Attempts = route.account.ID, route.account.Name, attempts
 			return result
 		}
 		attempts = append(attempts, PelicanGroupTestAttempt{AccountID: route.account.ID, AccountName: route.account.Name, Error: sample.ErrorMessage})
+		lastSample = sample
 		excluded[route.account.ID] = struct{}{}
 	}
 }
@@ -453,11 +499,13 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 // newResult is a failed result carrying the plan's config snapshot, labelled with the
 // public model the plan asks for (composite groups may send an upstream model instead).
 func (s *PelicanGroupTestService) newResult(plan *PelicanGroupTestPlan, started, finished time.Time, message string) *PelicanGroupTestResult {
+	zero := 0.0
 	result := &PelicanGroupTestResult{
 		PlanID:       plan.ID,
 		GroupID:      plan.GroupID,
 		Attempts:     []PelicanGroupTestAttempt{},
 		Status:       "failed",
+		CostUSD:      &zero,
 		ErrorMessage: message,
 		LatencyMs:    finished.Sub(started).Milliseconds(),
 		StartedAt:    started,
@@ -471,18 +519,35 @@ func (s *PelicanGroupTestService) newResult(plan *PelicanGroupTestPlan, started,
 	return result
 }
 
-// pelicanFailedBeforeOutput reports an account-side failure with no model output, such as
-// an upstream HTTP error or a missing token. Output problems (empty, oversized) are the
-// model's answer and do not trigger a retry on another account.
-func pelicanFailedBeforeOutput(result *ScheduledTestResult) bool {
-	if result.Status == "success" || result.ResponseText != "" {
+// pelicanGroupTestRetryable preserves model-answer failures while allowing explicitly
+// transient upstream/stream failures to discard partial output and start a fresh answer.
+// This applies only to buffered group tests, not streams already sent to API clients.
+func pelicanGroupTestRetryable(result *ScheduledTestResult) bool {
+	if result.Status != "failed" {
 		return false
 	}
 	switch result.ErrorMessage {
-	case pelicanErrEmptyOutput, pelicanErrCaptureLimit, pelicanErrHistoryLimit:
+	case pelicanErrEmptyOutput, pelicanErrCaptureLimit, pelicanErrHistoryLimit, pelicanErrMaxTokens:
 		return false
 	}
-	return true
+	if strings.HasPrefix(result.ErrorMessage, pelicanErrRefused) {
+		return false
+	}
+	if result.ResponseText == "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(result.ErrorMessage)) {
+	case "the service is temporarily unavailable. please retry later.",
+		"service temporarily unavailable", "service unavailable",
+		"stream ended before response.completed",
+		"generation stream ended before completion",
+		"chat completions stream from /v1/chat/completions ended before [done]",
+		"excel bps test response was interrupted",
+		"excel bps test response ended before completion":
+		return true
+	}
+	return strings.HasPrefix(result.ErrorMessage, "Stream read error: ") ||
+		strings.HasPrefix(result.ErrorMessage, "Chat Completions stream read error from /v1/chat/completions: ")
 }
 
 func (s *PelicanGroupTestService) ListResults(ctx context.Context, planID int64, page, pageSize int) ([]*PelicanGroupTestResult, int64, error) {
@@ -523,7 +588,25 @@ type gatewayPelicanGroupRouter struct {
 	slotWait    time.Duration
 }
 
+type pelicanGroupTestRoutingKey struct{}
+
+// pelicanGroupTestModelAllowed keeps a non-empty account mapping authoritative for
+// group tests, even when alias mode or passthrough permits other models in user traffic.
+// An empty mapping retains the existing unrestricted behavior. Check this before
+// ranking/acquiring slots so ineligible accounts cannot crowd out eligible candidates.
+func pelicanGroupTestModelAllowed(ctx context.Context, account *Account, model string) bool {
+	if enabled, _ := ctx.Value(pelicanGroupTestRoutingKey{}).(bool); !enabled {
+		return true
+	}
+	if len(account.GetModelMapping()) == 0 {
+		return true
+	}
+	_, matched := account.ResolveMappedModel(model)
+	return matched
+}
+
 func (r *gatewayPelicanGroupRouter) route(ctx context.Context, group *Group, model string, excluded map[int64]struct{}) (*pelicanGroupRoute, error) {
+	ctx = context.WithValue(ctx, pelicanGroupTestRoutingKey{}, true)
 	platform, upstreamModel := group.Platform, model
 	if platform == PlatformComposite {
 		decision, matched, err := r.gateway.resolveCompositeRouteDecision(ctx, group, model, CompositeRouteEndpointAny)

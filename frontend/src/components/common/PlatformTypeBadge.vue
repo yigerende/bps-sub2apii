@@ -108,7 +108,7 @@ const typeLabel = computed(() => {
     case 'bedrock':
       return 'AWS'
     case 'service_account':
-      return 'Vertex'
+      return 'Agent Platform (Vertex)'
     default:
       return props.type
   }
@@ -116,9 +116,13 @@ const typeLabel = computed(() => {
 
 const normalizedPlanType = computed(() => normalizePlanType(props.planType))
 
+// API keys can proxy another account's errors; legacy plan metadata is not their subscription.
+const isOpenAIAPIKey = computed(() => props.platform === 'openai' && props.type === 'apikey')
+
 const planLabel = computed(() => {
+  if (isOpenAIAPIKey.value) return ''
   if (!normalizedPlanType.value) return ''
-  // ChatGPT 档位命名（Pro 5x / Pro 20x、Business Standard / Business Premium）只适用于
+  // ChatGPT 档位命名（Pro 100 / Pro 200 / Pro 500、Business / Business Premium）只适用于
   // OpenAI：Antigravity 与 Grok 各自的 pro/team 沿用下面的通用标签。
   if (props.platform === 'openai') {
     const label = openAIPlanTypeLabel(props.planType)
@@ -176,7 +180,7 @@ const planIconName = computed<'bolt' | null>(() => {
 })
 
 const platformClass = computed(() => {
-  if (props.platform === 'anthropic') {
+  if (props.platform === 'anthropic' || props.platform === 'mistral') {
     return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
   }
   if (props.platform === 'openai') {
@@ -204,7 +208,7 @@ const platformClass = computed(() => {
 })
 
 const typeClass = computed(() => {
-  if (props.platform === 'anthropic') {
+  if (props.platform === 'anthropic' || props.platform === 'mistral') {
     return 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400'
   }
   if (props.platform === 'openai') {
@@ -259,13 +263,15 @@ const planBadgeClass = computed(() => {
   if (normalizedPlanType.value === 'plus') {
     return 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300'
   }
-  if (normalizedPlanType.value === 'team' || normalizedPlanType.value === 'selfservebusinessprolite') {
+  if (normalizedPlanType.value === 'team' || normalizedPlanType.value === 'selfservebusinessprolite' ||
+    (props.platform === 'openai' && ['selfservebusinessusagebased', 'business', 'enterprise', 'ent26', 'enterprisecbpautomation', 'enterprisecbpusagebased', 'edu', 'eduplus', 'edupro'].includes(normalizedPlanType.value))) {
     return 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
   }
   if (
     normalizedPlanType.value === 'pro' ||
     normalizedPlanType.value === 'chatgptpro' ||
-    normalizedPlanType.value === 'prolite'
+    normalizedPlanType.value === 'prolite' ||
+    (props.platform === 'openai' && normalizedPlanType.value === 'promax')
   ) {
     return 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
   }
@@ -274,6 +280,7 @@ const planBadgeClass = computed(() => {
 
 // Subscription expiration label (non-free only)
 const expiresLabel = computed(() => {
+  if (isOpenAIAPIKey.value) return ''
   if (!props.subscriptionExpiresAt || !props.planType) return ''
   if (
     normalizedPlanType.value === 'free' ||

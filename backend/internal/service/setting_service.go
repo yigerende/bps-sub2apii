@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/requestcapture"
+	"github.com/Wei-Shaw/sub2api/internal/serverless"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/iprisk"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"golang.org/x/sync/singleflight"
@@ -69,6 +72,18 @@ func (s *SettingService) GetGrokDefaultBaseURLMode(ctx context.Context) string {
 	return normalizeGrokDefaultBaseURLMode(raw)
 }
 
+// IsGrokVideoSourceURLEnabled fails closed: lookup errors keep the xAI media
+// URL hidden behind the authenticated content proxy.
+func (s *SettingService) IsGrokVideoSourceURLEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return false
+	}
+	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gatewayForwardingDBTimeout)
+	defer cancel()
+	raw, err := s.settingRepo.GetValue(dbCtx, SettingKeyGrokVideoSourceURLEnabled)
+	return err == nil && strings.TrimSpace(raw) == "true"
+}
+
 func (s *SettingService) GetGrokDefaultBaseURL(ctx context.Context) string {
 	return GrokBaseURLForMode(s.GetGrokDefaultBaseURLMode(ctx))
 }
@@ -118,8 +133,16 @@ type WebSearchManagerBuilder func(cfg *WebSearchEmulationConfig, proxyURLs map[i
 
 // SettingService 系统设置服务
 type SettingService struct {
+	scopedAdminKeyRepo                 ScopedAdminKeyRepository
+	IPRisk                             *iprisk.Manager     // Initialized before requests start.
+	Serverless                         *serverless.Manager // Initialized before requests start.
+	modelBillingCache                  modelBillingConfigCache
 	prioritySchedulingConfig           priorityConfigCache
 	requestCapture                     *requestcapture.Manager
+	astraRoutingMu                     sync.Mutex
+	astraRoutingOnSaved                func(config.AstraRoutingSettings)
+	astraRoutingCache                  *config.AstraRoutingSettings
+	astraRoutingExpires                time.Time
 	settingRepo                        SettingRepository
 	defaultSubGroupReader              DefaultSubscriptionGroupReader
 	proxyRepo                          ProxyRepository // for resolving websearch provider proxy URLs
@@ -134,6 +157,10 @@ type SettingService struct {
 	openAICodexVersionCache            atomic.Value // *cachedOpenAICodexClientVersion
 	openAICodexVersionSF               singleflight.Group
 	openAICodexTicketEnabledCache      atomic.Value // *cachedOpenAICodexTicketEnabled
+	openAIRequestTimezoneEnabledCache  atomic.Value // *cachedOpenAIRequestTimezoneEnabled
+	openAIRequestTimezoneAutoCache     atomic.Value // *cachedOpenAIRequestTimezoneAuto
+	openAIRequestTimezoneEnabledSF     singleflight.Group
+	openAIRequestTimezoneAutoSF        singleflight.Group
 	openAICodexTicketEnabledSF         singleflight.Group
 	openAICodexTicketFailClosedCache   atomic.Value // *cachedOpenAICodexTicketFailClosed
 	openAICodexTicketFailClosedSF      singleflight.Group
@@ -148,8 +175,10 @@ type SettingService struct {
 	claudeCodeVersionCache             atomic.Value // *cachedClaudeCodeClientVersion
 	claudeCodeVersionSF                singleflight.Group
 
+	cyberSessionBlockRuntimeMu    sync.Mutex
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime
 	cyberSessionBlockRuntimeSF    singleflight.Group
+	safetyPromptRuntimeCache      atomic.Value // *cachedSafetyPromptRuntime
 
 	// panelRateLimitCache 面板 API 限流配置进程内缓存（*cachedPanelRateLimitSettings）。
 	// 面板每个认证请求都会读取，禁止在热路径上直接访问 DB。
@@ -165,6 +194,14 @@ type SettingService struct {
 	openAIQuotaAutoPauseSettingsCache atomic.Value // *cachedOpenAIQuotaAutoPauseSettings
 	openAIQuotaAutoPauseSettingsSF    singleflight.Group
 	openAIAPIKeyHealthBreakerCache    atomic.Value // *cachedOpenAIAPIKeyHealthBreakerSettings
+
+	// openAIResponseHeaderTimeoutCache lets the HTTP upstream client read the
+	// admin-configurable OpenAI response-header timeout without a DB hit per
+	// request. SetOpenAIResponseHeaderTimeoutSettings refreshes it immediately.
+	openAIResponseHeaderTimeoutCache atomic.Value // *cachedOpenAIResponseHeaderTimeoutSettings
+	openAIResponseHeaderTimeoutSF    singleflight.Group
+	openAIResponseHeaderTimeoutMu    sync.Mutex
+	openAIResponseHeaderTimeoutGen   uint64 // guarded by Mu; successful saves supersede in-flight reads
 
 	channelMonitorRuntimeListenersMu sync.Mutex
 	channelMonitorRuntimeListeners   []func()
@@ -305,10 +342,11 @@ const (
 
 // NewSettingService 创建系统设置服务实例
 func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *SettingService {
-	return &SettingService{
-		settingRepo: settingRepo,
-		cfg:         cfg,
+	s := &SettingService{settingRepo: settingRepo, cfg: cfg}
+	if cfg != nil {
+		cfg.SetAstraRoutingLoader(s.astraRoutingRuntime)
 	}
+	return s
 }
 
 // SetDefaultSubscriptionGroupReader injects an optional group reader for default subscription validation.

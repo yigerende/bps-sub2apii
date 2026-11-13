@@ -37,7 +37,28 @@ func RegisterAdminRoutes(
 	admin.Use(gin.HandlerFunc(auditLog))
 	admin.Use(h.Admin.Account.AuthorizeObserver)
 	admin.Use(middleware.AdminComplianceGuard(settingService))
+	// 受限密钥的账户操作走独立资源校验，普通管理员保持原处理器。
+	admin.Use(h.Admin.Account.ScopedAdminKeyAccounts)
+	if h.Lottery != nil {
+		lottery := admin.Group("/lottery")
+		lottery.GET("/settings", h.Lottery.Settings)
+		lottery.PUT("/settings", h.Lottery.SaveSettings)
+		lottery.DELETE("/pools/:id", h.Lottery.DeletePool)
+		lottery.DELETE("/pools/:id/prizes/:prize_id", h.Lottery.DeletePrize)
+		lottery.GET("/pools", h.Lottery.AdminPools)
+		lottery.POST("/pools", h.Lottery.SavePool)
+		lottery.PUT("/pools/:id", h.Lottery.SavePool)
+		lottery.POST("/pools/:id/prizes", h.Lottery.SavePrize)
+		lottery.PUT("/pools/:id/prizes/:prize_id", h.Lottery.SavePrize)
+		lottery.GET("/records", h.Lottery.AdminRecords)
+		lottery.GET("/ledger", h.Lottery.AdminLedger)
+		lottery.GET("/invitations", h.Lottery.AdminInvitations)
+	}
 	{
+		// Optional region-to-Pod routing, configured inside Gateway settings.
+		admin.GET("/serverless", h.Admin.Setting.GetServerless)
+		admin.PUT("/serverless", h.Admin.Setting.SaveServerless)
+		admin.POST("/serverless/pods/:id/probe", h.Admin.Setting.ProbeServerless)
 		// 部署与运营合规确认
 		registerAdminComplianceRoutes(admin, h)
 
@@ -55,6 +76,7 @@ func RegisterAdminRoutes(
 
 		// 公告管理
 		registerAnnouncementRoutes(admin, h)
+		registerSupportTicketRoutes(admin, h)
 
 		// OpenAI OAuth
 		registerOpenAIOAuthRoutes(admin, h)
@@ -81,7 +103,7 @@ func RegisterAdminRoutes(
 		registerPromoCodeRoutes(admin, h)
 
 		// 系统设置
-		registerSettingsRoutes(admin, h)
+		registerSettingsRoutes(admin, h, stepUpAuth)
 		if h.Admin.RequestCapture != nil {
 			captures := admin.Group("/request-captures")
 			captures.Use(h.Admin.RequestCapture.Gate)
@@ -131,6 +153,7 @@ func RegisterAdminRoutes(
 
 		// 定时测试计划
 		registerScheduledTestRoutes(admin, h)
+		registerControlledExperimentRoutes(admin, h)
 
 		// 鹈鹕测智用户展示
 		registerPelicanShowcaseRoutes(admin, h)
@@ -141,6 +164,7 @@ func RegisterAdminRoutes(
 		// 渠道监控
 		registerChannelMonitorRoutes(admin, h, settingService)
 		registerChannelMonitorV2Routes(admin, h, settingService)
+		registerChannelMonitorV3Routes(admin, h, settingService)
 
 		// 风控中心
 		registerContentModerationRoutes(admin, h)
@@ -157,6 +181,12 @@ func RegisterAdminRoutes(
 }
 
 func registerPromptAuditRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	penalties := admin.Group("/security-penalties")
+	penalties.GET("/config", h.Admin.PromptAudit.GetPenaltyConfig)
+	penalties.PUT("/config", h.Admin.PromptAudit.SavePenaltyConfig)
+	penalties.GET("/events", h.Admin.PromptAudit.AdminPenaltyEvents)
+	penalties.GET("/events/:id", h.Admin.PromptAudit.AdminPenaltyEvent)
+	penalties.POST("/users/:user_id/release", h.Admin.PromptAudit.ReleasePenalty)
 	promptAudit := admin.Group("/prompt-audit")
 	{
 		promptAudit.GET("/config", h.Admin.PromptAudit.GetConfig)
@@ -197,8 +227,19 @@ func registerContentModerationRoutes(admin *gin.RouterGroup, h *handler.Handlers
 		risk.PUT("/config", h.Admin.ContentModeration.UpdateConfig)
 		risk.POST("/api-keys/test", h.Admin.ContentModeration.TestAPIKeys)
 		risk.GET("/status", h.Admin.ContentModeration.GetStatus)
+		risk.GET("/safety-prompt/config", h.Admin.ContentModeration.GetSafetyPromptConfig)
+		risk.PUT("/safety-prompt/config", h.Admin.ContentModeration.UpdateSafetyPromptConfig)
+		risk.GET("/safety-prompt/events", h.Admin.ContentModeration.ListSafetyPromptEvents)
 		risk.GET("/logs", h.Admin.ContentModeration.ListLogs)
+		risk.GET("/evidence/config", h.Admin.ContentModeration.GetCyberEvidenceConfig)
+		risk.PUT("/evidence/config", h.Admin.ContentModeration.UpdateCyberEvidenceConfig)
+		risk.GET("/logs/:id/evidence", h.Admin.ContentModeration.GetCyberEvidence)
+		risk.GET("/logs/:id/evidence/export", h.Admin.ContentModeration.ExportCyberEvidence)
+		risk.DELETE("/logs/:id/evidence", h.Admin.ContentModeration.DeleteCyberEvidence)
 		risk.POST("/users/:user_id/unban", h.Admin.ContentModeration.UnbanUser)
+		risk.GET("/users", h.Admin.ContentModeration.ListUsers)
+		risk.GET("/users/:user_id", h.Admin.ContentModeration.GetUser)
+		risk.POST("/users/:user_id/actions", h.Admin.ContentModeration.ManageUser)
 		risk.DELETE("/hashes", h.Admin.ContentModeration.DeleteFlaggedHash)
 		risk.DELETE("/hashes/all", h.Admin.ContentModeration.ClearFlaggedHashes)
 	}
@@ -214,6 +255,23 @@ func registerAdminAPIKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	ops := admin.Group("/ops")
 	{
+		// AI observe mode uses a separate bounded companion service. These routes
+		// deliberately grant no production account/scheduling mutation capability.
+		ops.GET("/ai/status", h.Admin.Ops.GetAIOpsStatus)
+		ops.GET("/ai/runs", h.Admin.Ops.ListAIOpsRuns)
+		ops.GET("/ai/runs/:id", h.Admin.Ops.GetAIOpsRun)
+		ops.POST("/ai/runs", h.Admin.Ops.CreateAIOpsRun)
+		ops.GET("/ai/policy", h.Admin.Ops.GetAIOpsPolicy)
+		ops.PUT("/ai/policy", h.Admin.Ops.SaveAIOpsPolicy)
+		ops.POST("/ai/halt", h.Admin.Ops.HaltAIOps)
+		ops.POST("/ai/proposals/preview", h.Admin.Ops.PreviewAIOpsProposal)
+		ops.POST("/ai/proposals/:id/apply", h.Admin.Ops.ApplyAIOpsProposal)
+		ops.POST("/ai/proposals/:id/cancel", h.Admin.Ops.CancelAIOpsProposal)
+		ops.GET("/ai/actions", h.Admin.Ops.ListAIOpsActions)
+		ops.POST("/ai/actions/:id/rollback", h.Admin.Ops.RollbackAIOpsAction)
+		ops.GET("/ai/probes", h.Admin.Ops.ListAIOpsProbes)
+		ops.POST("/ai/probes", h.Admin.Ops.CreateAIOpsProbe)
+
 		// Realtime ops signals
 		ops.GET("/concurrency", h.Admin.Ops.GetConcurrencyStats)
 		ops.GET("/user-concurrency", h.Admin.Ops.GetUserConcurrencyStats)
@@ -293,6 +351,8 @@ func registerOpsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// Dashboard (vNext - raw path for MVP)
 		ops.GET("/dashboard/snapshot-v2", h.Admin.Ops.GetDashboardSnapshotV2)
 		ops.GET("/dashboard/overview", h.Admin.Ops.GetDashboardOverview)
+		ops.GET("/dashboard/latency-report", h.Admin.Ops.LatencyReport)
+		ops.GET("/dashboard/network-series", h.Admin.Ops.NetworkSeries)
 		ops.GET("/dashboard/throughput-trend", h.Admin.Ops.GetDashboardThroughputTrend)
 		ops.GET("/dashboard/latency-histogram", h.Admin.Ops.GetDashboardLatencyHistogram)
 		ops.GET("/dashboard/error-trend", h.Admin.Ops.GetDashboardErrorTrend)
@@ -333,6 +393,9 @@ func registerUserManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		users.GET("/:id/api-keys", h.Admin.User.GetUserAPIKeys)
 		users.GET("/:id/usage", h.Admin.User.GetUserUsage)
 		users.GET("/:id/balance-history", h.Admin.User.GetBalanceHistory)
+		users.GET("/:id/auto-credit", h.Admin.User.GetAutoCredit)
+		users.PUT("/:id/auto-credit", h.Admin.User.SaveAutoCredit)
+		users.POST("/:id/auto-credit/:entry_id/settle", h.Admin.User.SettleAutoCredit)
 		users.POST("/:id/replace-group", h.Admin.User.ReplaceGroup)
 		users.GET("/:id/rpm-status", h.Admin.User.GetUserRPMStatus)
 		users.POST("/batch-concurrency", h.Admin.User.BatchUpdateConcurrency)
@@ -349,6 +412,7 @@ func registerUserManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 
 func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	groups := admin.Group("/groups")
+	groups.Use(h.Admin.Group.ScopedAdminKeyGroupModels)
 	{
 		groups.GET("", h.Admin.Group.List)
 		groups.GET("/all", h.Admin.Group.GetAll)
@@ -362,6 +426,8 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		groups.POST("/:id/composite-routes/preview", h.Admin.Group.PreviewCompositeRoute)
 		groups.PUT("/:id/composite-routes/:route_id", h.Admin.Group.UpdateCompositeRoute)
 		groups.DELETE("/:id/composite-routes/:route_id", h.Admin.Group.DeleteCompositeRoute)
+		groups.GET("/:id/anti-distillation", h.Admin.Group.GetAntiDistillation)
+		groups.PUT("/:id/anti-distillation", h.Admin.Group.SaveAntiDistillation)
 		groups.GET("/:id", h.Admin.Group.GetByID)
 		groups.POST("", h.Admin.Group.Create)
 		groups.POST("/:id/duplicate", h.Admin.Group.Duplicate)
@@ -382,7 +448,9 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	accounts := admin.Group("/accounts")
 	{
+		accounts.GET("/openai-request-timezones", h.Admin.Account.GetOpenAIRequestTimezones)
 		accounts.GET("", h.Admin.Account.List)
+		accounts.GET("/concurrency-summary", h.Admin.Account.GetConcurrencySummary)
 		accounts.GET("/management-capabilities", h.Admin.Setting.GetAccountManagementCapabilities)
 		accounts.GET("/upstream-billing-rates", h.Admin.Account.GetUpstreamBillingRates)
 		accounts.GET("/upstream-billing-probe/settings", h.Admin.Account.GetUpstreamBillingProbeSettings)
@@ -390,6 +458,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/upstream-billing-probe/batch", h.Admin.Account.ProbeUpstreamBillingBatch)
 		accounts.GET("/ollama-cloud-usage/settings", h.Admin.Account.GetOllamaCloudUsageSettings)
 		accounts.PUT("/ollama-cloud-usage/settings", h.Admin.Account.UpdateOllamaCloudUsageSettings)
+		accounts.GET("/astra-gateway/status", h.Admin.Account.AstraGatewayStatus)
+		accounts.GET("/astra-gateway/history", h.Admin.Account.AstraGatewayHistory)
+		accounts.POST("/astra-gateway/test", h.Admin.Account.AstraGatewayTest)
 		accounts.GET("/codex-harvest-flow", h.Admin.Account.GetCodexHarvestFlow)
 		accounts.GET("/codex-harvest-controls", h.Admin.Account.GetCodexHarvestControls)
 		accounts.PUT("/codex-harvest-controls", h.Admin.Account.UpdateCodexHarvestControls)
@@ -401,7 +472,22 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.PUT("/opencode-go-usage/settings", h.Admin.Account.UpdateOpenCodeGoUsageSettings)
 		accounts.GET("/:id", h.Admin.Account.GetByID)
 		if h.Admin.OpenAIOAuthReauth != nil {
+			accounts.POST("/:id/auth-connections/use-legacy", h.Admin.OpenAIOAuthReauth.SelectLegacyAuthConnection)
+			accounts.PUT("/:id/auth-connections/:connection_id/api-key", h.Admin.OpenAIOAuthReauth.RotateConnectionAPIKey)
+			accounts.GET("/:id/auth-connections", h.Admin.OpenAIOAuthReauth.ListAuthConnections)
+			accounts.POST("/:id/auth-connections", h.Admin.OpenAIOAuthReauth.CreateAuthConnection)
+			accounts.PATCH("/:id/auth-connections/:connection_id", h.Admin.OpenAIOAuthReauth.UpdateAuthConnection)
+			accounts.POST("/:id/auth-connections/:connection_id/authorize", h.Admin.OpenAIOAuthReauth.BeginConnectionAuthorization)
+			accounts.POST("/:id/auth-connections/:connection_id/callback", h.Admin.OpenAIOAuthReauth.CompleteConnectionAuthorization)
+			accounts.POST("/:id/auth-connections/:connection_id/revoke", h.Admin.OpenAIOAuthReauth.RevokeAuthConnection)
 			accounts.GET("/:id/openai-reauth", h.Admin.OpenAIOAuthReauth.GetStatus)
+			accounts.GET("/:id/siwc", h.Admin.OpenAIOAuthReauth.SIWCStatus)
+			accounts.POST("/:id/siwc/authorize", h.Admin.OpenAIOAuthReauth.BeginSIWC)
+			accounts.POST("/:id/siwc/callback", h.Admin.OpenAIOAuthReauth.CompleteSIWC)
+			accounts.GET("/:id/totp-rotation", h.Admin.OpenAIOAuthReauth.RotationStatus)
+			accounts.POST("/:id/totp-rotation", h.Admin.OpenAIOAuthReauth.RotateTOTP)
+			accounts.POST("/:id/totp-rotation/verify", h.Admin.OpenAIOAuthReauth.RetryTOTP)
+			accounts.POST("/:id/totp-export", h.Admin.OpenAIOAuthReauth.ExportTOTP)
 			accounts.PUT("/:id/openai-reauth/email", h.Admin.OpenAIOAuthReauth.SaveConfig)
 			accounts.POST("/:id/openai-reauth", h.Admin.OpenAIOAuthReauth.CreateTask)
 		}
@@ -411,9 +497,17 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)
 		accounts.POST("/sync/crs/preview", h.Admin.Account.PreviewFromCRS)
+		accounts.POST("/performance", h.Admin.Account.AccountPerformanceBatch)
+		accounts.PUT("/:id/performance", h.Admin.Account.SaveAccountPerformance)
+		accounts.POST("/:id/performance/release", h.Admin.Account.ReleaseAccountPerformance)
+		accounts.GET("/:id/performance/events", h.Admin.Account.AccountPerformanceEvents)
 		accounts.PUT("/:id", h.Admin.Account.Update)
 		accounts.GET("/:id/grok-media-eligibility", h.Admin.Account.GetGrokMediaEligibility)
 		accounts.PUT("/:id/grok-media-eligibility", h.Admin.Account.UpdateGrokMediaEligibility)
+		accounts.GET("/:id/upstream-billing-probe/config", h.Admin.Account.GetNewAPIConfig)
+		accounts.POST("/:id/upstream-billing-probe/config/preview", h.Admin.Account.PreviewNewAPIConfig)
+		accounts.PUT("/:id/upstream-billing-probe/config", h.Admin.Account.SaveNewAPIConfig)
+		accounts.DELETE("/:id/upstream-billing-probe/config", h.Admin.Account.DeleteNewAPIConfig)
 		accounts.PUT("/:id/upstream-billing-probe", h.Admin.Account.SetUpstreamBillingProbeEnabled)
 		accounts.POST("/:id/upstream-billing-probe", h.Admin.Account.ProbeUpstreamBilling)
 		accounts.GET("/:id/ollama-cloud-usage", h.Admin.Account.GetOllamaCloudUsage)
@@ -426,7 +520,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/:id/opencode-go-usage/refresh", h.Admin.Account.RefreshOpenCodeGoUsage)
 		accounts.DELETE("/:id", h.Admin.Account.Delete)
 		accounts.POST("/:id/test", h.Admin.Account.Test)
+		accounts.GET("/pelican-question", h.Admin.Account.PreparePelicanQuestion)
 		accounts.POST("/:id/pelican-test", h.Admin.Account.PelicanTest)
+		accounts.POST("/:id/modeltrace-test", h.Admin.Account.ModelTraceTest)
 		accounts.POST("/:id/state-probe", h.Admin.Account.StateProbe)
 		accounts.POST("/:id/recover-state", h.Admin.Account.RecoverState)
 		accounts.POST("/:id/refresh", h.Admin.Account.Refresh)
@@ -445,12 +541,21 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.GET("/:id/temp-unschedulable", h.Admin.Account.GetTempUnschedulable)
 		accounts.DELETE("/:id/temp-unschedulable", h.Admin.Account.ClearTempUnschedulable)
 		accounts.POST("/:id/schedulable", h.Admin.Account.SetSchedulable)
+		accounts.GET("/:id/schedulable-timers", h.Admin.Account.ListSchedulableTimers)
+		accounts.POST("/:id/schedulable-timers/preview", h.Admin.Account.PreviewSchedulableTimer)
+		accounts.POST("/:id/schedulable-timers", h.Admin.Account.SaveSchedulableTimer)
+		accounts.POST("/:id/schedulable-timers/daily-window", h.Admin.Account.SaveDailySchedulableWindow)
+		accounts.DELETE("/:id/schedulable-timers/:action", h.Admin.Account.CancelSchedulableTimer)
 		accounts.POST("/models/sync-upstream-preview", h.Admin.Account.SyncUpstreamModelsPreview)
 		accounts.GET("/:id/models", h.Admin.Account.GetAvailableModels)
+		accounts.GET("/:id/models/reasoning", h.Admin.Account.GetModelReasoning)
 		accounts.POST("/:id/models/sync-upstream", h.Admin.Account.SyncUpstreamModels)
 		accounts.POST("/batch", h.Admin.Account.BatchCreate)
 		// 账号导出泄露上游凭证原文——要求 step-up 2FA
 		accounts.GET("/data", gin.HandlerFunc(stepUpAuth), h.Admin.Account.ExportData)
+		accounts.POST("/:id/export-session", gin.HandlerFunc(stepUpAuth), h.Admin.Account.ExportOpenAISession)
+		accounts.GET("/:id/export-session/:task_id", h.Admin.Account.GetOpenAISessionExportTask)
+		accounts.GET("/:id/export-session/:task_id/download", gin.HandlerFunc(stepUpAuth), h.Admin.Account.DownloadOpenAISessionExport)
 		accounts.POST("/data", h.Admin.Account.ImportData)
 		accounts.POST("/batch-update-credentials", h.Admin.Account.BatchUpdateCredentials)
 		accounts.POST("/batch-refresh-tier", h.Admin.Account.BatchRefreshTier)
@@ -479,6 +584,15 @@ func registerOpenAIOAuthReauthWorkerRoutes(v1 *gin.RouterGroup, h *handler.Handl
 	worker := v1.Group("/internal/openai-reauth")
 	{
 		worker.POST("/claim", h.Admin.OpenAIOAuthReauth.Claim)
+		worker.POST("/session-export/claim", h.Admin.OpenAIOAuthReauth.ClaimSessionExport)
+		worker.POST("/:task_id/session-export/progress", h.Admin.OpenAIOAuthReauth.SessionExportProgress)
+		worker.POST("/:task_id/session-export/result", h.Admin.OpenAIOAuthReauth.SessionExportResult)
+		worker.POST("/:task_id/session-export/fail", h.Admin.OpenAIOAuthReauth.SessionExportFail)
+		worker.POST("/totp-claim", h.Admin.OpenAIOAuthReauth.ClaimTOTP)
+		worker.POST("/:task_id/totp-phase", h.Admin.OpenAIOAuthReauth.TOTPPhase)
+		worker.POST("/:task_id/totp-finish", h.Admin.OpenAIOAuthReauth.TOTPFinish)
+		worker.POST("/:task_id/totp-recover", h.Admin.OpenAIOAuthReauth.TOTPRecover)
+		worker.POST("/runtime-settings", h.Admin.OpenAIOAuthReauth.RuntimeSettings)
 		worker.POST("/:task_id/progress", h.Admin.OpenAIOAuthReauth.Progress)
 		worker.POST("/:task_id/callback", h.Admin.OpenAIOAuthReauth.Callback)
 		worker.POST("/:task_id/credentials", h.Admin.OpenAIOAuthReauth.Credentials)
@@ -495,6 +609,20 @@ func registerAnnouncementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		announcements.PUT("/:id", h.Admin.Announcement.Update)
 		announcements.DELETE("/:id", h.Admin.Announcement.Delete)
 		announcements.GET("/:id/read-status", h.Admin.Announcement.ListReadStatus)
+	}
+}
+
+// registerSupportTicketRoutes serves the admin side of support tickets. The
+// service answers SUPPORT_TICKET_DISABLED while the feature switch is off.
+func registerSupportTicketRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	tickets := admin.Group("/support-tickets")
+	{
+		tickets.GET("", h.SupportTicket.AdminList)
+		tickets.GET("/summary", h.SupportTicket.AdminSummary)
+		tickets.GET("/:id", h.SupportTicket.AdminGet)
+		tickets.POST("/:id/messages", h.SupportTicket.AdminReply)
+		tickets.POST("/:id/status", h.SupportTicket.AdminSetStatus)
+		tickets.DELETE("/:id", h.SupportTicket.AdminDelete)
 	}
 }
 
@@ -612,9 +740,22 @@ func registerPromoCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	}
 }
 
-func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	adminSettings := admin.Group("/settings")
+	registerScopedAdminKeyRoutes(adminSettings, h, stepUpAuth)
 	{
+		registerIPAuditRoutes(adminSettings, h.Admin.Setting)
+		adminSettings.GET("/ip-risk", h.Admin.Setting.GetIPRisk)
+		adminSettings.PUT("/ip-risk", h.Admin.Setting.SaveIPRisk)
+		adminSettings.GET("/ip-risk/events", h.Admin.Setting.GetIPRiskEvents)
+		adminSettings.DELETE("/ip-risk/events", h.Admin.Setting.ClearIPRiskEvents)
+		adminSettings.GET("/ip-risk/bans", h.Admin.Setting.GetIPRiskBans)
+		adminSettings.GET("/ip-risk/anonymous-bans", h.Admin.Setting.GetAnonymousAPIBans)
+		adminSettings.POST("/ip-risk/anonymous-unban", h.Admin.Setting.UnbanAnonymousAPI)
+		adminSettings.POST("/ip-risk/unban", h.Admin.Setting.UnbanIPRisk)
+		adminSettings.POST("/ip-risk/check", h.Admin.Setting.CheckIPRisk)
+		adminSettings.GET("/astra-routing", h.Admin.Setting.GetAstraRouting)
+		adminSettings.PUT("/astra-routing", h.Admin.Setting.UpdateAstraRouting)
 		adminSettings.GET("", h.Admin.Setting.GetSettings)
 		adminSettings.PUT("", h.Admin.Setting.UpdateSettings)
 		adminSettings.POST("/test-smtp", h.Admin.Setting.TestSMTPConnection)
@@ -626,8 +767,8 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		adminSettings.POST("/email-templates/:event/:locale/restore-official", h.Admin.Setting.RestoreOfficialEmailTemplate)
 		// Admin API Key 管理
 		adminSettings.GET("/admin-api-key", h.Admin.Setting.GetAdminAPIKey)
-		adminSettings.POST("/admin-api-key/regenerate", h.Admin.Setting.RegenerateAdminAPIKey)
-		adminSettings.DELETE("/admin-api-key", h.Admin.Setting.DeleteAdminAPIKey)
+		adminSettings.POST("/admin-api-key/regenerate", gin.HandlerFunc(stepUpAuth), h.Admin.Setting.RegenerateAdminAPIKey)
+		adminSettings.DELETE("/admin-api-key", gin.HandlerFunc(stepUpAuth), h.Admin.Setting.DeleteAdminAPIKey)
 		// 529过载冷却配置
 		adminSettings.GET("/overload-cooldown", h.Admin.Setting.GetOverloadCooldownSettings)
 		adminSettings.PUT("/overload-cooldown", h.Admin.Setting.UpdateOverloadCooldownSettings)
@@ -643,6 +784,11 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		// 流超时处理配置
 		adminSettings.GET("/stream-timeout", h.Admin.Setting.GetStreamTimeoutSettings)
 		adminSettings.PUT("/stream-timeout", h.Admin.Setting.UpdateStreamTimeoutSettings)
+		// OpenAI/Codex 响应头超时配置
+		adminSettings.GET("/openai-response-header-timeout", h.Admin.Setting.GetOpenAIResponseHeaderTimeoutSettings)
+		adminSettings.PUT("/openai-response-header-timeout", h.Admin.Setting.UpdateOpenAIResponseHeaderTimeoutSettings)
+		adminSettings.GET("/account-performance", h.Admin.Setting.GetAccountPerformanceSettings)
+		adminSettings.PUT("/account-performance", h.Admin.Setting.UpdateAccountPerformanceSettings)
 		// 请求整流器配置
 		adminSettings.GET("/rectifier", h.Admin.Setting.GetRectifierSettings)
 		adminSettings.PUT("/rectifier", h.Admin.Setting.UpdateRectifierSettings)
@@ -722,6 +868,7 @@ func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		system.PUT("/mihomo/download-mode", h.Admin.System.SetMihomoDownloadMode)
 		system.POST("/mihomo/nodes/:name/test", h.Admin.System.TestMihomoNode)
 		system.POST("/mihomo/nodes/:name/quality-check", h.Admin.System.CheckMihomoNodeQuality)
+		system.POST("/mihomo/nodes/static-proxies", h.Admin.System.AddMihomoNodesAsStaticProxies)
 		system.GET("/check-updates", h.Admin.System.CheckUpdates)
 		system.GET("/rollback-versions", h.Admin.System.GetRollbackVersions)
 		system.POST("/update", h.Admin.System.PerformUpdate)
@@ -757,7 +904,13 @@ func registerUsageRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	usage := admin.Group("/usage")
 	{
 		usage.GET("", h.Admin.Usage.List)
+		usage.GET("/traffic", h.Admin.Usage.Traffic)
+		usage.GET("/traffic/keys", h.Admin.Usage.TrafficKeys)
+		usage.GET("/traffic/health", h.Admin.Usage.TrafficHealth)
 		usage.GET("/stats", h.Admin.Usage.Stats)
+		usage.GET("/latency-report", h.Admin.Usage.LatencyReport)
+		usage.GET("/connections", h.Admin.Usage.Connections)
+		usage.POST("/connections/edge", h.Admin.Usage.ImportEdgeConnections)
 		usage.GET("/:id/timing", h.Admin.Usage.Timing)
 		usage.GET("/search-users", h.Admin.Usage.SearchUsers)
 		usage.GET("/search-api-keys", h.Admin.Usage.SearchAPIKeys)
@@ -783,11 +936,29 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.GET("/priority-scheduling/config", h.Admin.Setting.GetPriorityScheduling)
 	admin.PUT("/priority-scheduling/config", h.Admin.Setting.SavePriorityScheduling)
 	admin.GET("/priority-scheduling/snapshot", h.Admin.Account.PrioritySchedulingSnapshot)
+	admin.GET("/priority-scheduling/analysis", h.Admin.Account.PrioritySchedulingAnalysis)
+	admin.GET("/priority-scheduling/models", h.Admin.Account.PrioritySchedulingModels)
+	admin.GET("/priority-scheduling/latency", h.Admin.Account.PrioritySchedulingLatency)
+	admin.POST("/priority-scheduling/recompute", h.Admin.Account.RecomputePriorityScheduling)
+	admin.GET("/priority-scheduling/sticky-bindings", h.Admin.Account.PrioritySchedulingStickyBindings)
+	admin.POST("/priority-scheduling/sticky-bindings/clear", h.Admin.Account.ClearPrioritySchedulingStickyBindings)
 	admin.GET("/account-ops/auto-config", h.Admin.AccountOps.GetAutoConfig)
 	admin.PUT("/account-ops/auto-config", h.Admin.AccountOps.SaveAutoConfig)
+	admin.GET("/account-ops/auto-config/events", h.Admin.AccountOps.ListAutoConfigEvents)
 	admin.GET("/account-ops/config", h.Admin.AccountOps.GetConfig)
 	admin.PUT("/account-ops/config", h.Admin.AccountOps.SaveConfig)
+	admin.PUT("/account-ops/notification-settings", h.Admin.AccountOps.SaveNotificationSettings)
+	admin.PUT("/account-ops/webhooks/:id", h.Admin.AccountOps.SaveWebhook)
+	admin.DELETE("/account-ops/webhooks/:id", h.Admin.AccountOps.DeleteWebhook)
+	admin.PUT("/account-ops/rules/batch", h.Admin.AccountOps.SaveRulesBatch)
+	admin.PUT("/account-ops/rules/:id", h.Admin.AccountOps.SaveRule)
+	admin.DELETE("/account-ops/rules/:id", h.Admin.AccountOps.DeleteRule)
 	admin.GET("/account-ops/alerts", h.Admin.AccountOps.List)
+	admin.GET("/account-ops/balance-accounts", h.Admin.AccountOps.BalanceAccounts)
+	admin.GET("/account-ops/threshold-accounts", h.Admin.AccountOps.ThresholdAccounts)
+	admin.GET("/account-ops/groups", h.Admin.AccountOps.Groups)
+	admin.PUT("/account-ops/groups", h.Admin.AccountOps.SaveGroups)
+	admin.POST("/account-ops/webhooks/:id/test", h.Admin.AccountOps.TestWebhook)
 	// 智能运维 → 凭证守护：账号令牌巡检 / 自动重登 / 错误态自愈
 	admin.GET("/account-ops/token-guard/status", h.Admin.AccountTokenGuard.Status)
 	admin.PUT("/account-ops/token-guard/config", h.Admin.AccountTokenGuard.SaveConfig)
@@ -800,16 +971,32 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.POST("/account-ops/token-guard/two-fa-login", h.Admin.AccountTokenGuard.StartTwoFALogin)
 	admin.GET("/account-ops/token-guard/two-fa-login/:id", h.Admin.AccountTokenGuard.TwoFALogin)
 	admin.DELETE("/account-ops/token-guard/two-fa-login/:id", h.Admin.AccountTokenGuard.DeleteTwoFALogin)
+	admin.GET("/account-ops/token-guard-v2/encryption", h.Admin.AccountTokenGuard.CredentialEncryption)
+	admin.POST("/account-ops/token-guard-v2/encryption/initialize", h.Admin.AccountTokenGuard.InitializeCredentialEncryption)
 	admin.GET("/account-ops/token-guard-v2/accounts", h.Admin.AccountTokenGuardV2.List)
 	admin.PUT("/account-ops/token-guard-v2/rules", h.Admin.AccountTokenGuardV2.SaveRules)
+	admin.PUT("/account-ops/token-guard-v2/runtime", h.Admin.AccountTokenGuardV2.SaveRuntime)
+	admin.PATCH("/account-ops/token-guard-v2/accounts/:id/switches", h.Admin.AccountTokenGuardV2.UpdateSwitches)
 	admin.POST("/account-ops/token-guard-v2/accounts", h.Admin.AccountTokenGuardV2.Create)
 	admin.PUT("/account-ops/token-guard-v2/accounts/:id", h.Admin.AccountTokenGuardV2.Update)
 	admin.DELETE("/account-ops/token-guard-v2/accounts/:id", h.Admin.AccountTokenGuardV2.Delete)
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/probe", h.Admin.AccountTokenGuardV2.Probe)
 	admin.POST("/account-ops/token-guard-v2/accounts/:id/relogin", h.Admin.AccountTokenGuardV2.Relogin)
+	admin.POST("/account-ops/token-guard-v2/accounts/:id/resume-relogin-budget", h.Admin.AccountTokenGuardV2.ResumeReloginBudget)
 	admin.GET("/account-quality-results", h.Admin.ScheduledTest.ListQualityHistory)
 	admin.GET("/account-quality-plans", h.Admin.ScheduledTest.ListQualityPlans)
 	admin.POST("/account-quality-plans/:id/run", h.Admin.ScheduledTest.TriggerQuality)
+	admin.GET("/account-quality-plans/:id/ownership", h.Admin.ScheduledTest.QualityOwnershipPreview)
+	admin.POST("/account-quality-plans/:id/ownership/reconcile", h.Admin.ScheduledTest.QualityOwnershipReconcile)
+	admin.POST("/account-quality-plans/:id/ownership/restore", h.Admin.ScheduledTest.QualityOwnershipRestore)
+	admin.POST("/account-quality-plans/:id/ownership/remove-model", h.Admin.ScheduledTest.QualityOwnershipRemoveModel)
+	admin.GET("/account-quality-templates", h.Admin.ScheduledTest.ListQualityTemplates)
+	admin.GET("/account-quality-presets", h.Admin.ScheduledTest.ListQualityPresets)
+	admin.POST("/account-quality-presets", h.Admin.ScheduledTest.CreateQualityPreset)
+	admin.PUT("/account-quality-presets/:id", h.Admin.ScheduledTest.UpdateQualityPreset)
+	admin.POST("/account-quality-templates", h.Admin.ScheduledTest.CreateQualityTemplate)
+	admin.PUT("/account-quality-templates/:id", h.Admin.ScheduledTest.UpdateQualityTemplate)
+	admin.DELETE("/account-quality-templates/:id", h.Admin.ScheduledTest.DeleteQualityTemplate)
 	admin.GET("/pelican-test-results", h.Admin.ScheduledTest.ListPelicanHistory)
 	plans := admin.Group("/scheduled-test-plans")
 	plans.Use(h.Admin.ScheduledTest.ObserverGuard(h.Admin.Account))
@@ -826,6 +1013,17 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 
 // Admins browse the gallery through the user page. The Smart Ops page edits the gallery
 // settings and the group tests that feed it.
+func registerControlledExperimentRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	experiments := admin.Group("/controlled-experiments")
+	experiments.Use(h.Admin.ControlledExperiment.FullAdmin)
+	experiments.GET("/catalog", h.Admin.ControlledExperiment.Catalog)
+	experiments.GET("", h.Admin.ControlledExperiment.List)
+	experiments.POST("", h.Admin.ControlledExperiment.Create)
+	experiments.GET("/:id", h.Admin.ControlledExperiment.Report)
+	experiments.POST("/:id/start", h.Admin.ControlledExperiment.Start)
+	experiments.POST("/:id/stop", h.Admin.ControlledExperiment.Stop)
+}
+
 func registerPelicanShowcaseRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.GET("/pelican-showcase/settings", h.PelicanShowcase.GetSettings)
 	admin.PUT("/pelican-showcase/settings", h.PelicanShowcase.UpdateSettings)
@@ -879,9 +1077,25 @@ func registerPluginRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAut
 }
 
 func registerChannelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h.Admin.Account != nil && h.Admin.Channel != nil {
+		h.Admin.Account.SetUpstreamChannelService(h.Admin.Channel.UpstreamChannelService())
+	}
+	admin.GET("/upstream-channels", h.Admin.Channel.ListUpstreamChannels)
+	admin.POST("/upstream-channels", h.Admin.Channel.MutateUpstreamChannel)
+	admin.GET("/upstream-channels/:id", h.Admin.Channel.GetUpstreamChannel)
+	admin.PUT("/upstream-channels/:id", h.Admin.Channel.MutateUpstreamChannel)
+	admin.DELETE("/upstream-channels/:id", h.Admin.Channel.MutateUpstreamChannel)
+	admin.GET("/upstream-channels/:id/members", h.Admin.Channel.UpstreamChannelMembers)
+	admin.GET("/upstream-channel-bindings", h.Admin.Channel.ReadUpstreamChannelBindings)
+	admin.PUT("/upstream-channel-bindings", h.Admin.Channel.BindUpstreamChannelAccounts)
+	admin.GET("/profit-operations/snapshot", h.Admin.Channel.ProfitOperations)
+	admin.GET("/upstream-operations/snapshot", h.Admin.Channel.UpstreamOperations)
 	channels := admin.Group("/channels")
 	{
 		channels.GET("", h.Admin.Channel.List)
+		channels.GET("/:id/operations", h.Admin.Channel.OperationsCatalog)
+		channels.POST("/:id/operations", h.Admin.Channel.MutateOperations)
+		channels.GET("/operations/snapshot", h.Admin.Channel.OperationsSnapshot)
 		channels.GET("/model-pricing", h.Admin.Channel.GetModelDefaultPricing)
 		channels.GET("/pricing/sync-models", h.Admin.Channel.SyncPricingModels)
 		channels.GET("/:id", h.Admin.Channel.GetByID)
@@ -967,6 +1181,30 @@ func registerChannelMonitorV2Routes(admin *gin.RouterGroup, h *handler.Handlers,
 	}
 }
 
+// registerChannelMonitorV3Routes keeps editing and previewing available in any
+// mode so a site can be prepared before switching. The preview has data
+// whenever the passive aggregation runs (v2 or v3).
+func registerChannelMonitorV3Routes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
+	admin.PUT("/channel-monitor-mode", h.ChannelMonitorV3.SetMode)
+
+	monitor := admin.Group("/channel-monitor-v3")
+	monitor.Use(channelMonitorAdminFeatureGuard(settingService))
+	{
+		monitor.GET("/settings", h.ChannelMonitorV3.GetSettings)
+		monitor.PUT("/config", h.ChannelMonitorV3.UpdateConfig)
+		monitor.PUT("/idle-probe", h.ChannelMonitorV3.UpdateIdleProbe)
+		monitor.POST("/categories", h.ChannelMonitorV3.CreateCategory)
+		monitor.PUT("/categories/:id", h.ChannelMonitorV3.UpdateCategory)
+		monitor.DELETE("/categories/:id", h.ChannelMonitorV3.DeleteCategory)
+		monitor.POST("/components", h.ChannelMonitorV3.CreateComponent)
+		monitor.PUT("/components/:id", h.ChannelMonitorV3.UpdateComponent)
+		monitor.DELETE("/components/:id", h.ChannelMonitorV3.DeleteComponent)
+		monitor.POST("/reorder", h.ChannelMonitorV3.Reorder)
+		monitor.GET("/status", h.ChannelMonitorV3.Status)
+		monitor.GET("/incidents", h.ChannelMonitorV3.Incidents)
+	}
+}
+
 func channelMonitorAdminFeatureGuard(settingService *service.SettingService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if settingService != nil && settingService.GetChannelMonitorRuntime(c.Request.Context()).Enabled {
@@ -980,6 +1218,15 @@ func channelMonitorAdminFeatureGuard(settingService *service.SettingService) gin
 
 // channelMonitorModeV2Guard requires feature enabled and channel_monitor_mode=v2.
 func channelMonitorModeV2Guard(settingService *service.SettingService) gin.HandlerFunc {
+	return channelMonitorModeGuard(settingService, service.ChannelMonitorRuntime.V2Active)
+}
+
+// channelMonitorModeV3Guard requires feature enabled and channel_monitor_mode=v3.
+func channelMonitorModeV3Guard(settingService *service.SettingService) gin.HandlerFunc {
+	return channelMonitorModeGuard(settingService, service.ChannelMonitorRuntime.V3Active)
+}
+
+func channelMonitorModeGuard(settingService *service.SettingService, allowed func(service.ChannelMonitorRuntime) bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if settingService == nil {
 			response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
@@ -992,7 +1239,7 @@ func channelMonitorModeV2Guard(settingService *service.SettingService) gin.Handl
 			c.Abort()
 			return
 		}
-		if !rt.PassiveAggregationAllowed() {
+		if !allowed(rt) {
 			response.ErrorFrom(c, service.ErrChannelMonitorModeMismatch)
 			c.Abort()
 			return

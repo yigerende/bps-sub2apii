@@ -6,7 +6,7 @@
 
 # bps-sub2api
 
-[![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
+[![Go](https://img.shields.io/badge/Go-1.27.4-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-336791.svg)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
@@ -48,10 +48,10 @@ Sub2API は、AI 製品のサブスクリプションから API クォータを�
 
 | コンポーネント | 技術 |
 |-----------|------------|
-| バックエンド | Go 1.27.0, Gin, Ent |
+| バックエンド | Go 1.27.4, Gin, Ent |
 | フロントエンド | Vue 3.4+, Vite 5+, TailwindCSS |
 | データベース | PostgreSQL 15+ |
-| キャッシュ/キュー | Redis 7+ |
+| キャッシュ/キュー | Redis 6.0+ |
 
 ---
 
@@ -77,7 +77,7 @@ GitHub Releases からビルド済みバイナリをダウンロードするワ�
 
 - Linux サーバー（amd64 または arm64）
 - PostgreSQL 15+（インストール済みかつ稼働中）
-- Redis 7+（インストール済みかつ稼働中）
+- Redis 6.0+（インストール済みかつ稼働中）
 - root 権限
 
 #### インストール手順
@@ -202,8 +202,10 @@ JWT_SECRET=your_jwt_secret_here
 TOTP_ENCRYPTION_KEY=your_totp_key_here
 
 # オプション: 管理者アカウント
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=your_admin_password
+# 空欄の場合、初回起動時にランダムなメールアドレス（ログインユーザー名）とパスワードが自動生成され、ログに出力されます。
+# admin@example.com のような推測されやすい値は総当たり攻撃の標的になるため避けてください。
+ADMIN_EMAIL=
+ADMIN_PASSWORD=
 
 # オプション: カスタムポート
 SERVER_PORT=8080
@@ -252,9 +254,9 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 ブラウザで `http://YOUR_SERVER_IP:8080` を開いてください。
 
-管理者パスワードが自動生成された場合は、ログで確認できます:
+管理者メールアドレス（ログインユーザー名）またはパスワードが自動生成された場合は、ログで確認できます:
 ```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
+docker compose -f docker-compose.local.yml logs sub2api | grep "Generated admin"
 ```
 
 #### アップグレード
@@ -328,7 +330,7 @@ cd bps-sub2api/deploy
 - Go 1.21+
 - Node.js 18+
 - PostgreSQL 15+
-- Redis 7+
+- Redis 6.0+
 
 #### ビルド手順
 

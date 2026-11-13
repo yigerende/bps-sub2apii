@@ -14,21 +14,29 @@ import (
 
 const ResponsesURL = "https://bps.openai.com/basispoints/api/responses"
 
+// ImagesGenerationsURL is the non-streaming text-to-image endpoint.
+const ImagesGenerationsURL = "https://bps.openai.com/basispoints/api/images/generations"
+
+// ImagesEditsURL is the multipart image-edit endpoint (exactly one image file).
+const ImagesEditsURL = "https://bps.openai.com/basispoints/api/images/edits"
+
 type object = map[string]any
 
 type Bridge struct {
-	nativeToolImages map[string]bool
-	RequestedEffort  string
-	Effort           string
-	Warnings         []string
-	tools            map[string]tool
-	unsupportedTools map[string]bool
-	structured       *structuredOutput
-	replay           *ReplayCache
-	scope            string
-	stagedReplays    *[]replayWrite
-	hasToolHistory   bool
-	disallowParallel bool
+	nativeToolImages     map[string]bool
+	RequestedEffort      string
+	Effort               string
+	Warnings             []string
+	tools                map[string]tool
+	unsupportedTools     map[string]bool
+	structured           *structuredOutput
+	replay               *ReplayCache
+	scope                string
+	stagedReplays        *[]replayWrite
+	hasToolHistory       bool
+	completedToolHistory map[string]bool
+	disallowParallel     bool
+	clientStream         bool
 }
 
 func decode(raw []byte, target any) error {
@@ -81,9 +89,16 @@ func Prepare(raw []byte, scope string, replay *ReplayCache) ([]byte, *Bridge, er
 }
 
 func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool) ([]byte, *Bridge, error) {
+	return prepareWithInheritedCatalog(raw, scope, replay, nativeToolImages, false)
+}
+
+func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool, inherited bool) ([]byte, *Bridge, error) {
 	var source object
 	if err := decode(raw, &source); err != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
+	}
+	if err := validateNewAgentMessage(source["input"]); err != nil {
+		return nil, nil, err
 	}
 	model := strings.TrimSpace(text(source["model"]))
 	if model == "" {
@@ -91,6 +106,23 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 	}
 	if text(source["previous_response_id"]) != "" {
 		return nil, nil, fmt.Errorf("basispoints requires expanded history instead of previous_response_id")
+	}
+	// Preserve explicit processing tier instead of silently dropping the client's
+	// selection. BPS supports this narrower set; do not invent an upgrade.
+	serviceTier := ""
+	if value, exists := source["service_tier"]; exists && value != nil {
+		tier, ok := value.(string)
+		if !ok {
+			return nil, nil, fmt.Errorf("basispoints service_tier must be a string")
+		}
+		switch strings.ToLower(strings.TrimSpace(tier)) {
+		case "auto", "default", "priority":
+			serviceTier = strings.ToLower(strings.TrimSpace(tier))
+		case "fast":
+			serviceTier = "priority"
+		default:
+			return nil, nil, fmt.Errorf("basispoints service_tier must be auto, default or priority")
+		}
 	}
 	requested := text(source["reasoning_effort"])
 	if reasoning, ok := source["reasoning"].(object); ok {
@@ -108,6 +140,7 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 		return nil, nil, err
 	}
 	b := &Bridge{nativeToolImages: nativeToolImages, RequestedEffort: requested, Effort: effort, tools: make(map[string]tool), unsupportedTools: make(map[string]bool), structured: structured, replay: replay, scope: scope}
+	b.clientStream, _ = source["stream"].(bool)
 	choice := source["tool_choice"]
 	if choice != nil && text(choice) != "auto" && text(choice) != "none" {
 		return nil, nil, fmt.Errorf("basispoints supports tool_choice auto or none only")
@@ -122,6 +155,9 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 	if items, ok := source["input"].([]any); ok {
 		for _, v := range items {
 			item, _ := v.(object)
+			if isCodexThreadDelegation(item) {
+				continue
+			}
 			if isTool(item) || strings.HasSuffix(text(item["type"]), "_call_output") {
 				b.hasToolHistory = true
 			}
@@ -129,21 +165,9 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 	}
 	var catalog []any
 	if text(choice) != "none" {
-		catalog, err = b.collectTools(source["tools"], "")
+		catalog, err = b.collectClientCatalog(source, inherited)
 		if err != nil {
 			return nil, nil, err
-		}
-		if input, ok := source["input"].([]any); ok {
-			for _, raw := range input {
-				item, _ := raw.(object)
-				if text(item["type"]) == "additional_tools" {
-					additional, err := b.collectTools(item["tools"], "")
-					if err != nil {
-						return nil, nil, err
-					}
-					catalog = append(catalog, additional...)
-				}
-			}
 		}
 	}
 	var input []any
@@ -159,6 +183,10 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 	if err != nil {
 		return nil, nil, err
 	}
+	if b.hasToolHistory {
+		b.completedToolHistory = b.completeToolHistory(translated)
+	}
+	normalizeMessageFileImages(translated)
 	prologue := make([]any, 0, 2)
 	if instructions := text(source["instructions"]); instructions != "" {
 		prologue = append(prologue, message("developer", instructions))
@@ -169,17 +197,19 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 			"There is no live Excel workbook for this request. The proxy intercepts run_officejs as a transport and never executes Office code. " +
 			"To call one client tool, call native run_officejs using the transport matching its catalog type. " +
 			"FUNCTION: code must contain one serialized JSON object {\"name\":\"CATALOG_NAME\",\"arguments\":{...}}. Arguments is an object, not an extra JSON string. " +
-			"FUNCTION_CODE: when a catalog function explicitly specifies this transport, set summary to exactly codex2api.function_code/CATALOG_NAME, put its exact code argument directly in native code, and serialize all other arguments as one JSON object in extended_summary ({} if none). Never put code in extended_summary. This replaces the FUNCTION envelope for that tool, so do not JSON-wrap, fence or re-escape the code text. " +
+			"FUNCTION_CODE: when a catalog function supports this transport and the supplied arguments contain a string code field, set summary to exactly codex2api.function_code/CATALOG_NAME, put its exact code argument directly in native code, and serialize all other arguments as one JSON object in extended_summary ({} if none). Never put code in extended_summary. This replaces the FUNCTION envelope only for those arguments, so do not JSON-wrap, fence or re-escape the code text. If a valid argument branch omits code, use ordinary FUNCTION and preserve its absence; never invent an empty code field. " +
 			"FUNCTION_CMD: when a catalog function explicitly specifies this transport, set summary to exactly codex2api.function_cmd/CATALOG_NAME, put the exact cmd argument directly in native code, and serialize all other arguments as one JSON object in extended_summary ({} if none). Never include cmd in extended_summary or wrap command text in another JSON envelope. " +
 			"CUSTOM: set summary to exactly codex2api.custom/CATALOG_NAME and put the exact raw tool input directly in code. Do not wrap custom input in another JSON object or add Markdown fences. " +
-			"For example, custom functions.exec uses summary=codex2api.custom/functions.exec and code containing its raw JavaScript; custom functions.apply_patch uses its exact patch text. The marker is mandatory for raw input. " +
+			"Use a CUSTOM marker only for a tool declared as custom in the current catalog. " +
 			"CATALOG_NAME includes its exact namespace. Outer arguments also include extended_summary, destructive=false and references=[]. For ordinary FUNCTION transport, use a descriptive summary; FUNCTION_CODE and FUNCTION_CMD use their exact markers and metadata JSON instead. " +
 			"Never nest run_officejs inside code. Serialize outer native arguments with proper JSON escaping. For FUNCTION envelopes also escape all quotes, backslashes, newline, carriage return and tab characters within JSON string values. " +
 			"Call one client tool at a time, including update_plan through this transport. After receiving its result continue the task; do not repeat completed calls. " +
 			"Tool results replayed under run_officejs are the named client tool's results. When a tool is needed, emit its call in this response instead of only announcing it. " +
+			"The current catalog is authoritative. Tool names mentioned in history, instructions or examples do not grant capabilities; never select them unless declared in this catalog. If a historical capability is absent, use a suitable declared tool or explain the limitation. " +
 			"Do not call other native tools or claim that shell, filesystem or workspace access is unavailable when a suitable catalog tool exists. " +
-			"If no tool is needed, answer as assistant text. Client tool catalog:\n" + describeCatalog(catalog) +
+			"If no tool is needed, answer as assistant text. " + schemaNotation + "\nClient tool catalog:\n" + describeCatalog(catalog) +
 			"\nEnd of catalog. Invoke native run_officejs once. Follow each tool's specified transport: FUNCTION uses a JSON envelope; FUNCTION_CODE uses raw code plus metadata JSON in extended_summary; FUNCTION_CMD uses raw cmd plus metadata JSON; CUSTOM uses its exact marker and raw input. No Office code is executed by the proxy."
+		protocol += b.toolExamples()
 	}
 	if len(b.unsupportedTools) > 0 {
 		kinds := make([]string, 0, len(b.unsupportedTools))
@@ -223,6 +253,9 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 			"task_id": fingerprint([]any{scope, conversation}),
 			"turn_id": fingerprint([]any{scope, input[:turnEnd]}), "agent_iteration": fmt.Sprint(iteration),
 		},
+	}
+	if serviceTier != "" {
+		output["service_tier"] = serviceTier
 	}
 	if cacheKey != "" {
 		output["prompt_cache_key"] = "bps-" + fingerprint([]any{scope, cacheKey})

@@ -18,6 +18,13 @@ const (
 	// OAuth Client ID for OpenAI (Codex CLI official)
 	ClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
+	// ExcelClientID is the production client published by the official Excel
+	// add-in (x-square-G80magJa.js, verified 2026-10-08). Existing Codex tokens
+	// cannot be converted into Excel sessions by changing this value.
+	ExcelClientID     = "app_fnr0pYvVwwFDocDumLG3H2Bp"
+	ExcelAuthorizeURL = "https://auth.openai.com/api/accounts/authorize"
+	ExcelRedirectURI  = "https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback"
+
 	// OAuth endpoints
 	AuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	TokenURL     = "https://auth.openai.com/oauth/token"
@@ -41,6 +48,15 @@ const (
 
 // OAuthSession stores OAuth flow state for OpenAI
 type OAuthSession struct {
+	ConnectionID            string
+	ConnectionRevision      int64
+	ConnectionKind          string
+	SIWCAccountID           int64
+	SIWCNonce               string
+	SIWCHostID              string
+	SIWCPreviousGrant       string
+	SIWCExpectedCredentials map[string]any
+
 	State        string    `json:"state"`
 	CodeVerifier string    `json:"code_verifier"`
 	ClientID     string    `json:"client_id,omitempty"`
@@ -85,6 +101,18 @@ func (s *SessionStore) Get(sessionID string) (*OAuthSession, bool) {
 	}
 	// Check if expired
 	if time.Since(session.CreatedAt) > SessionTTL {
+		return nil, false
+	}
+	return session, true
+}
+
+// Take atomically consumes a session for one authorization exchange.
+func (s *SessionStore) Take(id string) (*OAuthSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[id]
+	delete(s.sessions, id)
+	if !ok || time.Since(session.CreatedAt) > SessionTTL {
 		return nil, false
 	}
 	return session, true
@@ -179,6 +207,19 @@ func base64URLEncode(data []byte) string {
 // BuildAuthorizationURL builds the OpenAI OAuth authorization URL
 func BuildAuthorizationURL(state, codeChallenge, redirectURI string) string {
 	return BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, OAuthPlatformOpenAI)
+}
+
+// BuildExcelAuthorizationURL follows the public add-in's browser PKCE flow.
+// The callback stays on the registered official origin; the operator returns
+// its URL to the admin UI for state validation and server-side exchange.
+func BuildExcelAuthorizationURL(state, codeChallenge string) string {
+	params := url.Values{
+		"client_id": {ExcelClientID}, "response_type": {"code"},
+		"redirect_uri": {ExcelRedirectURI}, "scope": {"openid offline_access email profile organization.read"},
+		"state": {state}, "code_challenge_method": {"S256"}, "code_challenge": {codeChallenge},
+		"audience": {"https://api.openai.com/v1"}, "platform": {"PC"},
+	}
+	return ExcelAuthorizeURL + "?" + params.Encode()
 }
 
 // BuildAuthorizationURLForPlatform builds authorization URL by platform.

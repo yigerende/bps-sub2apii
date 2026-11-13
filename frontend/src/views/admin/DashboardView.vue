@@ -169,13 +169,13 @@
             </div>
           </div>
 
-          <!-- Performance (RPM/TPM) -->
-          <div class="card p-4">
+          <!-- Performance (RPM/TPM and current account concurrency) -->
+          <div class="card col-span-2 p-4 lg:col-span-1">
             <div class="flex items-center gap-3">
               <div class="rounded-lg bg-violet-100 p-2 dark:bg-violet-900/30">
                 <Icon name="bolt" size="md" class="text-violet-600 dark:text-violet-400" :stroke-width="2" />
               </div>
-              <div class="flex-1">
+              <div class="min-w-0 flex-1">
                 <p class="text-xs font-medium text-gray-500 dark:text-gray-400">
                   {{ t('admin.dashboard.performance') }}
                 </p>
@@ -185,13 +185,29 @@
                   </p>
                   <span class="text-xs text-gray-500 dark:text-gray-400">RPM</span>
                 </div>
-                <div class="flex items-baseline gap-2">
-                  <p class="text-sm font-semibold text-violet-600 dark:text-violet-400">
-                    {{ formatTokens(stats.tpm) }}
-                  </p>
-                  <span class="text-xs text-gray-500 dark:text-gray-400">TPM</span>
-                </div>
               </div>
+            </div>
+            <div
+              class="mt-1 flex items-baseline gap-1.5 overflow-x-auto whitespace-nowrap"
+              data-testid="account-concurrency"
+              :title="t('admin.dashboard.accountConcurrencyHint')"
+            >
+              <span class="shrink-0 text-sm font-semibold text-violet-600 dark:text-violet-400">
+                {{ accountConcurrency === null ? '—' : formatNumber(accountConcurrency) }}
+              </span>
+              <span class="shrink-0 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.dashboard.accountConcurrency') }}
+              </span>
+              <NewFeatureBadge
+                :notice-id="NEW_FEATURE_NOTICES.dashboardAccountConcurrency"
+                :user-id="authStore.user?.id"
+                compact
+              />
+              <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">/</span>
+              <span class="shrink-0 text-sm font-semibold text-violet-600 dark:text-violet-400">
+                {{ formatTokens(stats.tpm) }}
+              </span>
+              <span class="shrink-0 text-xs text-gray-500 dark:text-gray-400">TPM</span>
             </div>
           </div>
 
@@ -276,6 +292,7 @@
                 <DateRangePicker
                   v-model:start-date="startDate"
                   v-model:end-date="endDate"
+                  :rolling24-hours="true"
                   @change="onDateRangeChange"
                 />
               </div>
@@ -318,9 +335,16 @@
 
           <!-- User Usage Trend (Full Width) -->
           <div class="card p-4">
-            <h3 class="mb-4 text-sm font-semibold text-gray-900 dark:text-white">
-              {{ t('admin.dashboard.recentUsage') }} (Top 12)
-            </h3>
+            <div class="mb-4 flex items-center justify-between gap-3">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('admin.dashboard.recentUsage') }} (Top 12)</h3>
+              <div class="flex gap-1" role="group" :aria-label="t('admin.dashboard.recentUsage')">
+                <button v-for="metric in (['tokens', 'actual_cost'] as const)" :key="metric" type="button"
+                  class="rounded px-2 py-1 text-xs" :class="userTrendMetric === metric ? 'bg-blue-600 text-white' : 'text-gray-600 dark:text-gray-300'"
+                  :aria-pressed="userTrendMetric === metric" @click="setUserTrendMetric(metric)">
+                  {{ t(metric === 'tokens' ? 'admin.dashboard.tokens' : 'admin.dashboard.actualSpending') }}
+                </button>
+              </div>
+            </div>
             <div class="h-64">
               <div v-if="userTrendLoading" class="flex h-full items-center justify-center">
                 <LoadingSpinner size="md" />
@@ -345,6 +369,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 
 const { t } = useI18n()
 import { adminAPI } from '@/api/admin'
@@ -357,6 +382,8 @@ import type {
 } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import NewFeatureBadge from '@/components/common/NewFeatureBadge.vue'
+import { NEW_FEATURE_NOTICES } from '@/constants/newFeatureNotices'
 import Icon from '@/components/icons/Icon.vue'
 import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import Select from '@/components/common/Select.vue'
@@ -388,9 +415,12 @@ ChartJS.register(
 )
 
 const appStore = useAppStore()
+const authStore = useAuthStore()
 const router = useRouter()
 const { canUseBatchImage, refreshBatchImageAccess } = useBatchImageAccess()
 const stats = ref<DashboardStats | null>(null)
+const accountConcurrency = ref<number | null>(null)
+let accountConcurrencyLoadSeq = 0
 const loading = ref(false)
 const chartsLoading = ref(false)
 const userTrendLoading = ref(false)
@@ -401,6 +431,7 @@ const rankingError = ref(false)
 const trendData = ref<TrendDataPoint[]>([])
 const modelStats = ref<ModelStat[]>([])
 const userTrend = ref<UserUsageTrendPoint[]>([])
+const userTrendMetric = ref<'tokens' | 'actual_cost'>('tokens')
 const rankingItems = ref<UserSpendingRankingItem[]>([])
 const rankingTotalActualCost = ref(0)
 const rankingTotalRequests = ref(0)
@@ -410,17 +441,12 @@ let usersTrendLoadSeq = 0
 let rankingLoadSeq = 0
 const rankingLimit = 12
 
-// Helper function to format date in local timezone
-const formatLocalDate = (date: Date): string => {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
 const getLast24HoursRangeDates = (): { start: string; end: string } => {
   const end = new Date()
   const start = new Date(end.getTime() - 24 * 60 * 60 * 1000)
   return {
-    start: formatLocalDate(start),
-    end: formatLocalDate(end)
+    start: start.toISOString(),
+    end: end.toISOString()
   }
 }
 
@@ -429,6 +455,7 @@ const granularity = ref<'day' | 'hour'>('hour')
 const defaultRange = getLast24HoursRangeDates()
 const startDate = ref(defaultRange.start)
 const endDate = ref(defaultRange.end)
+const appliedPreset = ref<string | null>('last24Hours')
 
 // Granularity options for Select component
 const granularityOptions = computed(() => [
@@ -476,7 +503,7 @@ const lineOptions = computed(() => ({
       },
       callbacks: {
         label: (context: any) => {
-          return `${context.dataset.label}: ${formatTokens(context.raw)}`
+          return `${context.dataset.label}: ${formatUserTrendValue(Number(context.raw))}`
         }
       }
     }
@@ -502,7 +529,7 @@ const lineOptions = computed(() => ({
         font: {
           size: 10
         },
-        callback: (value: string | number) => formatTokens(Number(value))
+        callback: (value: string | number) => formatUserTrendValue(Number(value))
       }
     }
   }
@@ -536,7 +563,7 @@ const userTrendChartData = computed(() => {
     if (!userGroups.has(key)) {
       userGroups.set(key, { name: getDisplayName(point), data: new Map() })
     }
-    userGroups.get(key)!.data.set(point.date, point.tokens)
+    userGroups.get(key)!.data.set(point.date, userTrendMetric.value === 'tokens' ? point.tokens : point.actual_cost)
   })
 
   const sortedDates = Array.from(allDates).sort()
@@ -571,6 +598,9 @@ const userTrendChartData = computed(() => {
 })
 
 // Format helpers
+const formatUserTrendValue = (value: number): string =>
+  userTrendMetric.value === 'tokens' ? formatTokens(value) : `$${formatCost(value)}`
+
 const formatTokens = (value: number | undefined): string => {
   if (value === undefined || value === null) return '0'
   if (value >= 1_000_000_000) {
@@ -628,6 +658,8 @@ const onDateRangeChange = (range: {
   endDate: string
   preset: string | null
 }) => {
+  appliedPreset.value = range.preset
+
   // Auto-select granularity based on date range
   const start = new Date(range.startDate)
   const end = new Date(range.endDate)
@@ -679,6 +711,13 @@ const loadDashboardSnapshot = async (includeStats: boolean) => {
   }
 }
 
+const setUserTrendMetric = (metric: 'tokens' | 'actual_cost') => {
+  if (userTrendMetric.value === metric) return
+  userTrendMetric.value = metric
+  userTrend.value = []
+  loadUsersTrend()
+}
+
 const loadUsersTrend = async () => {
   const currentSeq = ++usersTrendLoadSeq
   userTrendLoading.value = true
@@ -687,7 +726,8 @@ const loadUsersTrend = async () => {
       start_date: startDate.value,
       end_date: endDate.value,
       granularity: granularity.value,
-      limit: 12
+      limit: 12,
+      metric: userTrendMetric.value
     })
     if (currentSeq !== usersTrendLoadSeq) return
     userTrend.value = response.trend || []
@@ -732,9 +772,28 @@ const loadUserSpendingRanking = async () => {
   }
 }
 
+const loadAccountConcurrency = async () => {
+  const currentSeq = ++accountConcurrencyLoadSeq
+  accountConcurrency.value = null
+  try {
+    const { current_concurrency: count } = await adminAPI.accounts.getConcurrencySummary()
+    if (currentSeq !== accountConcurrencyLoadSeq) return
+    accountConcurrency.value = Number.isSafeInteger(count) && count >= 0 ? count : null
+  } catch {
+    if (currentSeq === accountConcurrencyLoadSeq) accountConcurrency.value = null
+  }
+}
+
 const loadDashboardStats = async () => {
+  if (appliedPreset.value === 'last24Hours') {
+    const range = getLast24HoursRangeDates()
+    startDate.value = range.start
+    endDate.value = range.end
+  }
+
   await Promise.all([
     loadDashboardSnapshot(true),
+    loadAccountConcurrency(),
     loadUsersTrend(),
     loadUserSpendingRanking()
   ])

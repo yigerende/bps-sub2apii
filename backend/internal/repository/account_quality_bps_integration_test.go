@@ -25,6 +25,10 @@ func newQualityBPSFixture(t *testing.T, extra string, policy *service.QualityPol
 	ctx := context.Background()
 	f := &qualityBPSFixture{t: t, plans: NewScheduledTestPlanRepository(integrationDB)}
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO accounts(name,platform,type,status,schedulable,extra) VALUES('quality-bps','openai','oauth','active',true,$1::jsonb) RETURNING id`, extra).Scan(&f.account))
+	// This fixture represents accounts already authorized for BPS; tests below
+	// explicitly remove the grant when exercising preparation failures.
+	_, grantErr := integrationDB.ExecContext(ctx, `INSERT INTO openai_excel_oauth_credentials(account_id,credentials_ciphertext) VALUES($1,'test-encrypted-grant')`, f.account)
+	require.NoError(t, grantErr)
 	t.Cleanup(func() {
 		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM scheduler_outbox WHERE account_id=$1`, f.account)
 		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM scheduled_test_plans WHERE account_id=$1`, f.account)
@@ -92,7 +96,7 @@ func (f *qualityBPSFixture) events() int {
 }
 
 func TestQualityEnableBPSLifecycle(t *testing.T) {
-	f := newQualityBPSFixture(t, `{"codex_7d_used_percent":10,"unrelated":"kept","openai_excel_bps_ignore_images":true}`, &service.QualityPolicy{
+	f := newQualityBPSFixture(t, `{"codex_7d_used_percent":10,"unrelated":"kept","openai_excel_bps_cache_creation_as_input":true}`, &service.QualityPolicy{
 		Action: service.QualityActionEnableBPS, AutoRestore: true,
 		BPS: &service.QualityBPSPolicy{FailureThreshold: 2, UsagePercent: 80, PassThreshold: 2, HoldOnUsage: true,
 			Models: []string{"gpt-6-astra"}, OmitUnsupportedTools: true, IgnoreEncryptedContent: true},
@@ -113,7 +117,7 @@ func TestQualityEnableBPSLifecycle(t *testing.T) {
 	require.Equal(t, true, extra["openai_excel_bps"])
 	require.Equal(t, []any{"gpt-6-astra"}, extra["openai_excel_bps_models"])
 	require.Equal(t, true, extra[service.ExcelBPSOmitUnsupportedToolsKey])
-	require.Equal(t, false, extra[service.ExcelBPSIgnoreImagesKey])
+	require.Equal(t, false, extra["openai_excel_bps_cache_creation_as_input"])
 	require.Equal(t, true, extra[service.ExcelBPSIgnoreEncryptedContentKey])
 	require.NotContains(t, extra, service.ExcelBPS403TargetGroupIDKey)
 	require.Equal(t, "kept", extra["unrelated"])
@@ -138,11 +142,11 @@ func TestQualityEnableBPSLifecycle(t *testing.T) {
 	require.Equal(t, "restored", f.apply("passed"))
 	extra = f.extra()
 	for _, key := range service.QualityBPSManagedKeys {
-		if key != service.ExcelBPSIgnoreImagesKey {
+		if key != "openai_excel_bps_cache_creation_as_input" {
 			require.NotContains(t, extra, key, "keys absent before BPS are removed on restore")
 		}
 	}
-	require.Equal(t, true, extra[service.ExcelBPSIgnoreImagesKey], "previous values come back")
+	require.Equal(t, true, extra["openai_excel_bps_cache_creation_as_input"], "previous values come back")
 	require.Equal(t, "kept", extra["unrelated"])
 	require.Zero(t, f.count(states))
 	require.Equal(t, 1, f.events())
@@ -170,10 +174,58 @@ func TestQualityEnableBPSLifecycle(t *testing.T) {
 	require.Equal(t, "bps_already_enabled", f.apply("failed"))
 	require.Equal(t, []any{"gpt-5.6-sol"}, f.extra()["openai_excel_bps_models"])
 
+	f.exec(`UPDATE accounts SET credentials='{"plan_type":"free"}', extra=extra - 'openai_excel_bps' WHERE id=$1`)
+	require.Equal(t, "bps_unsupported", f.apply("failed"))
+	require.NotContains(t, f.extra(), "openai_excel_bps")
+
 	f.exec(`UPDATE accounts SET type='apikey', extra=extra - 'openai_excel_bps' WHERE id=$1`)
 	require.Equal(t, "bps_unsupported", f.apply("failed"))
 	require.NotContains(t, f.extra(), "openai_excel_bps")
 	require.Zero(t, f.events(), "conflicts and blocked rounds leave the account untouched")
+}
+
+func TestQualityBPSObservationReleasesOwnershipWithoutTogglingBPS(t *testing.T) {
+	f := newQualityBPSFixture(t, `{"unrelated":"kept"}`, &service.QualityPolicy{
+		Action: service.QualityActionEnableBPS, AutoRestore: true,
+		BPS: &service.QualityBPSPolicy{FailureThreshold: 1, AllModels: true},
+	})
+	require.Equal(t, "bps_enabled", f.apply("failed"))
+	before := f.extra()
+	require.Equal(t, true, before["openai_excel_bps"])
+	_ = f.events()
+	oldPlan := *f.plan
+	f.plan.PelicanConfig = &service.PelicanTestConfig{QuestionKind: "candy", TestChannel: "bps", Prompt: "Return 21", ReasoningEffort: "high", ParallelCount: 1,
+		Quality: &service.QualityPolicy{Action: service.QualityActionObserveOnly, ExpectedAnswer: "21", AutoRestore: true}}
+	svc := service.NewScheduledTestService(f.plans, NewScheduledTestResultRepository(integrationDB))
+	_, err := svc.CreatePlan(context.Background(), &service.ScheduledTestPlan{AccountID: f.account, ModelID: "gpt-6-astra", CronExpression: "*/30 * * * *", Enabled: false,
+		PelicanConfig: &service.PelicanTestConfig{QuestionKind: "candy", Prompt: "Return 21", ReasoningEffort: "high", ParallelCount: 1,
+			Quality: &service.QualityPolicy{Action: "disable_scheduling", ExpectedAnswer: "21"}}})
+	require.NoError(t, err)
+	updated, err := svc.UpdatePlan(context.Background(), f.plan)
+	require.NoError(t, err)
+	require.False(t, updated.PelicanConfig.Quality.AutoRestore)
+	replacement := oldPlan
+	replacement.ID, replacement.Enabled = 0, false
+	_, err = svc.CreatePlan(context.Background(), &replacement)
+	require.NoError(t, err, "BPS control remains independent of observation and quarantine")
+	require.Equal(t, 3, f.count("SELECT count(*) FROM scheduled_test_plans WHERE account_id=$1"))
+	require.Equal(t, before, f.extra(), "conversion preserves the current BPS settings")
+	require.Zero(t, f.count(`SELECT count(*) FROM account_quality_states s JOIN scheduled_test_plans p ON p.id=s.plan_id WHERE p.account_id=$1`))
+	result, err := f.plans.ApplyQualityOutcome(context.Background(), &oldPlan, f.until, "passed")
+	require.NoError(t, err)
+	require.Equal(t, "stale_run", result, "a previous native probe cannot restore after conversion")
+	require.NoError(t, f.plans.FinishPelican(context.Background(), f.plan.ID, f.until, time.Now()))
+	f.plan = updated
+	f.claim()
+	for _, outcome := range []string{"passed", "failed", "inconclusive"} {
+		require.Equal(t, "observed", f.apply(outcome))
+		require.Equal(t, before, f.extra())
+	}
+	require.Zero(t, f.events())
+	// A separate policy may turn BPS off without observation turning it back on.
+	f.exec(`UPDATE accounts SET extra=extra||'{"openai_excel_bps":false}' WHERE id=$1`)
+	require.Equal(t, "observed", f.apply("failed"))
+	require.Equal(t, false, f.extra()["openai_excel_bps"])
 }
 
 func TestQualityEnableBPSStateSurvivesActionChange(t *testing.T) {
@@ -253,4 +305,14 @@ func TestQualityEnableBPSRestoreAfterAccountEditorSave(t *testing.T) {
 	require.True(t, account.IsExcelBPSEnabledForModel("gpt-6-astra"))
 	require.NoError(t, repo.Update(context.Background(), account))
 	require.Equal(t, "restored", f.apply("passed"))
+}
+
+func TestQualityEnableBPSRequiresExcelAuthorization(t *testing.T) {
+	f := newQualityBPSFixture(t, `{}`, &service.QualityPolicy{Action: service.QualityActionEnableBPS, BPS: &service.QualityBPSPolicy{FailureThreshold: 1, AllModels: true}})
+	f.exec(`DELETE FROM openai_excel_oauth_credentials WHERE account_id=$1`)
+	require.Equal(t, "bps_authorizing", f.apply("failed"))
+	require.Equal(t, true, f.extra()["openai_excel_bps"])
+	require.Equal(t, true, f.extra()[service.ExcelBPSAuthorizationPendingKey])
+	f.exec(`INSERT INTO openai_excel_oauth_credentials(account_id,credentials_ciphertext) VALUES($1,'test-encrypted-grant')`)
+	// The worker callback, tested separately, clears preparation automatically.
 }

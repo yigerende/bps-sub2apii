@@ -1,12 +1,24 @@
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach as setupPiniaBeforeEach } from 'vitest'
+setupPiniaBeforeEach(() => setActivePinia(createPinia()))
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import IQTestModal from '../IQTestModal.vue'
+import TestModelSelect from '../TestModelSelect.vue'
+import { apiClient } from '@/api/client'
 
-const { probeOpenAICodexState } = vi.hoisted(() => ({ probeOpenAICodexState: vi.fn() }))
+const { probeOpenAICodexState, getAvailableModels, getModelReasoning } = vi.hoisted(() => ({
+  probeOpenAICodexState: vi.fn(), getAvailableModels: vi.fn(), getModelReasoning: vi.fn()
+}))
 
 vi.mock('@/api/admin/accounts', async () => {
   const actual = await vi.importActual<typeof import('@/api/admin/accounts')>('@/api/admin/accounts')
-  return { ...actual, probeOpenAICodexState }
+  return { ...actual, probeOpenAICodexState, getAvailableModels, getModelReasoning }
+})
+
+beforeEach(() => {
+  getAvailableModels.mockReset().mockResolvedValue([])
+  getModelReasoning.mockReset().mockResolvedValue({ supported_reasoning_levels: ['low', 'medium', 'high'], default_reasoning_level: 'medium' })
 })
 
 vi.mock('vue-i18n', async () => {
@@ -19,9 +31,9 @@ vi.mock('vue-i18n', async () => {
   }
 })
 
-function streamResponse(events: Array<Record<string, unknown>>) {
+function streamResponse(events: Array<Record<string, unknown> | string>) {
   const encoder = new TextEncoder()
-  const chunks = events.map((event) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+  const chunks = events.map((event) => encoder.encode(typeof event === 'string' ? event : `data: ${JSON.stringify(event)}\n\n`))
   let index = 0
   return {
     ok: true,
@@ -76,6 +88,78 @@ describe('IQTestModal', () => {
     vi.restoreAllMocks()
   })
 
+  it('freezes one random question across samples and stores its version with the actual prompt', async () => {
+    const question = { id: 'pelican-bicycle', version: 'svg-motion-v1', round_id: 'manual:00000000000000000000000000000000', source: 'builtin:svg-motion', prompt: 'Draw fixture', criteria: ['Fixture rubric'] }
+    vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { prompt: question.prompt, actual_prompt: 'Draw fixture\n\nHTML only', pelican_question: question } })
+    const wrapper = mountModal()
+    const vm = wrapper.vm as any
+    vm.selectQuestion('pelican')
+    vm.selectPromptMode('random')
+    await flushPromises()
+    vm.parallelCount = 2
+    await vm.startTest()
+    const requests = vi.mocked(global.fetch).mock.calls.filter(([url]) => String(url).includes('/pelican-test'))
+    expect(requests).toHaveLength(2)
+    for (const [, options] of requests) {
+      expect(JSON.parse(options!.body as string)).toMatchObject({ prompt: 'Draw fixture\n\nHTML only', prompt_mode: 'random', pelican_question: question })
+    }
+    const record = JSON.parse(localStorage.getItem('sub2api-pelican-test:42')!)[0]
+    expect(record.pelicanQuestion).toEqual(question)
+    expect(record.actualPrompt).toBe('Draw fixture\n\nHTML only')
+    vm.prompt = 'Later edit'
+    expect(record.prompt).toBe('Draw fixture')
+    await wrapper.setProps({ account: { id: 43, name: 'Second fixture', platform: 'openai', type: 'oauth', status: 'active' } as any })
+    vm.selectQuestion('pelican')
+    vm.selectPromptMode('random')
+    await flushPromises()
+    await vm.startTest()
+    const comparison = vi.mocked(global.fetch).mock.calls.find(([url]) => String(url).includes('/43/pelican-test'))
+    expect(JSON.parse(comparison![1]!.body as string).pelican_question).toEqual(question)
+    expect(apiClient.get).toHaveBeenCalledTimes(1)
+    const secondRecord = JSON.parse(localStorage.getItem('sub2api-pelican-test:43')!)[0]
+    expect(secondRecord.pelicanQuestion).toEqual(record.pelicanQuestion)
+    wrapper.unmount()
+  })
+
+  it('keeps all eight configured model IDs when discovery only returns six', async () => {
+    const ids = ['codex-auto-review', 'gpt-5.5', 'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol']
+    getAvailableModels.mockResolvedValue(ids.filter(id => !['gpt-5.6-terra', 'gpt-6.1-sol'].includes(id))
+      .map(id => ({ id, display_name: id.toUpperCase() })))
+    const wrapper = mountModal({ credentials: { model_mapping: { ...Object.fromEntries(ids.map(id => [id, id])), 'custom-*': 'upstream-target' } } })
+    await flushPromises()
+    const picker = wrapper.getComponent(TestModelSelect)
+    expect(picker.props('options').map(option => option.value).sort()).toEqual([...ids].sort())
+    expect(picker.props('options').map(option => option.label)).not.toContain('upstream-target')
+    picker.vm.$emit('update:modelValue', 'gpt-6.1-sol')
+    await flushPromises()
+    await (wrapper.vm as any).startTest()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe('gpt-6.1-sol')
+    wrapper.unmount()
+  })
+
+  it('submits a manually entered model without discovery overwriting it', async () => {
+    let finishDiscovery!: (models: Array<{ id: string }>) => void
+    getAvailableModels.mockReturnValue(new Promise(resolve => { finishDiscovery = resolve }))
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="model-input-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="manual-model-input"]').setValue('gpt-6.1-sol')
+    finishDiscovery([{ id: 'gpt-5.5' }])
+    await flushPromises()
+    expect((wrapper.get('[data-testid="manual-model-input"]').element as HTMLInputElement).value).toBe('gpt-6.1-sol')
+    await (wrapper.vm as any).startTest()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe('gpt-6.1-sol')
+    expect(getModelReasoning).toHaveBeenLastCalledWith(42, 'gpt-6.1-sol')
+    wrapper.unmount()
+  })
+
+  it('retains configured choices when discovery fails', async () => {
+    getAvailableModels.mockRejectedValue(new Error('discovery unavailable'))
+    const wrapper = mountModal({ credentials: { model_mapping: { 'gpt-6.1-sol': 'gpt-6.1-sol' } } })
+    await flushPromises()
+    expect(wrapper.getComponent(TestModelSelect).props('options')).toEqual([{ value: 'gpt-6.1-sol', label: 'gpt-6.1-sol' }])
+    wrapper.unmount()
+  })
+
   it('uses the dedicated endpoint and sends identical settings to parallel runs', async () => {
     const wrapper = mountModal()
     ;(wrapper.vm as any).selectQuestion('pelican')
@@ -94,6 +178,7 @@ describe('IQTestModal', () => {
       })
       expect(body.prompt).toContain('SVG 绘制一个鹈鹕骑自行车的 2D 动画')
       expect(body.prompt).toContain('直接返回独立 HTML')
+      expect(body.prompt).not.toContain('不要有任何限制')
     }
 
     const frames = wrapper.findAll('iframe')
@@ -102,6 +187,49 @@ describe('IQTestModal', () => {
     expect(frames[0].attributes('srcdoc')).toContain('<svg></svg>')
     expect(wrapper.text()).toContain('admin.accounts.pelicanTest.success')
     expect(localStorage.getItem('sub2api-pelican-test:42')).toContain('gpt-6-astra')
+  })
+
+  it('starts Claude accounts on a Claude model and other accounts on the OpenAI default', async () => {
+    const wrapper = mountModal({ platform: 'anthropic', name: 'Claude account' })
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body)
+    expect(body.model_id).toBe('claude-opus-5-5')
+
+    await wrapper.setProps({ account: { id: 43, name: 'Astra account', platform: 'openai', type: 'oauth', status: 'active' } as any })
+    expect((wrapper.vm as any).modelId).toBe('gpt-6-astra')
+  })
+
+  it('ignores fragmented keepalive comments without changing generated HTML', async () => {
+    const html = '<!doctype html><html><body>verified</body></html>'
+    global.fetch = vi.fn(() => Promise.resolve(streamResponse([
+      ': keep', 'alive\n\n',
+      { type: 'test_start', model: 'gpt-6-astra' },
+      ': keepalive\n\n',
+      { type: 'content', text: html },
+      ': keepalive\n\n',
+      { type: 'test_complete', success: true }
+    ]))) as any
+    const wrapper = mountModal()
+    ;(wrapper.vm as any).selectQuestion('pelican')
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect((wrapper.vm as any).runs[0]).toMatchObject({ status: 'success', output: html })
+    expect(wrapper.get('iframe').attributes('srcdoc')).toContain('<body>verified</body>')
+    expect(wrapper.get('iframe').attributes('srcdoc')).not.toContain('keepalive')
+    wrapper.unmount()
+  })
+
+  it('does not treat keepalive comments as output or successful completion', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(streamResponse([': keepalive\n\n', ': keepalive\n\n']))) as any
+    const wrapper = mountModal()
+    ;(wrapper.vm as any).selectQuestion('pelican')
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect((wrapper.vm as any).runs[0]).toMatchObject({ status: 'error', output: '' })
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('keeps non-HTML output visible but marks it as failed', async () => {
@@ -173,6 +301,18 @@ describe('Intelligence question selection', () => {
     expect((wrapper.vm as any).questionKind).toBe('candy')
     wrapper.unmount()
   })
+  it('previews generated reasoning as text without changing the manual question mode', async () => {
+    const wrapper = mountModal()
+    const manualKind = (wrapper.vm as any).questionKind
+    ;(wrapper.vm as any).previewScheduled({ id: 1, status: 'success', response_text: '{"example":0}', error_message: '', latency_ms: 100, started_at: new Date().toISOString(), pelican_config: { question_kind: 'random_reasoning', prompt: 'Synthetic generated question', reasoning_effort: 'medium', parallel_count: 1 } })
+    await flushPromises()
+    expect((wrapper.vm as any).questionKind).toBe(manualKind)
+    expect((wrapper.vm as any).runs[0].questionKind).toBe('random_reasoning')
+    expect((wrapper.vm as any).runs[0].html).toBe('')
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('previews scheduled candy results without marking text as invalid HTML', async () => {
     const wrapper = mountModal()
     ;(wrapper.vm as any).previewScheduled({ id: 1, status: 'success', response_text: '29', error_message: '', latency_ms: 100, started_at: new Date().toISOString(), pelican_config: { question_kind: 'candy', prompt: 'question', reasoning_effort: 'medium', parallel_count: 1 } })
@@ -181,6 +321,33 @@ describe('Intelligence question selection', () => {
     expect((wrapper.vm as any).runs[0].status).toBe('success')
     expect(wrapper.find('iframe').exists()).toBe(false)
     expect(wrapper.text()).toContain('29')
+    wrapper.unmount()
+  })
+})
+
+describe('IQTestModal test records', () => {
+  it('opens only this account over the dialog and returns to the test on close', async () => {
+    const wrapper = mount(IQTestModal, {
+      props: { show: true, account: { id: 42, name: 'Astra account', platform: 'openai', type: 'oauth', status: 'active' } as any, accounts: [{ id: 7, name: 'Other account' }] as any },
+      global: { stubs: { BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }, Input: true, TextArea: true, Select: true, Icon: true, PelicanRecordsDashboard: true } }
+    })
+    await flushPromises()
+    const records = () => wrapper.findComponent({ name: 'PelicanRecordsDashboard' })
+    expect(records().exists()).toBe(false)
+    await wrapper.get('[data-testid="open-records"]').trigger('click')
+    expect(records().props('accountOnly')).toBe(true)
+    expect(records().props('account')).toMatchObject({ id: 42 })
+    records().vm.$emit('showAll')
+    await flushPromises()
+    expect(records().props('accountOnly')).toBe(false)
+    records().vm.$emit('close')
+    await flushPromises()
+    expect(records().exists()).toBe(false)
+    expect(wrapper.emitted('close')).toBeUndefined()
+    // A records window left open closes with the dialog.
+    await wrapper.get('[data-testid="open-records"]').trigger('click')
+    await wrapper.setProps({ show: false })
+    expect(records().exists()).toBe(false)
     wrapper.unmount()
   })
 })

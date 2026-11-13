@@ -126,6 +126,11 @@ func (r *upstreamBillingProbeAccountRepo) UpdateUpstreamBillingProbeSnapshot(
 		account.Extra = make(map[string]any)
 	}
 	account.Extra[UpstreamBillingProbeExtraKey] = snapshot
+	if isUpstreamBillingProbeAccount(account) && account.CostMultiplierAutoSyncEnabled() {
+		if cost, ok := snapshot.CostMultiplierToSync(); ok {
+			account.Extra[AccountCostMultiplierExtraKey] = cost
+		}
+	}
 	if snapshot.Status == UpstreamBillingProbeStatusOK &&
 		rateMultiplier != nil &&
 		upstreamBillingRateSyncEnabled(account) {
@@ -414,6 +419,8 @@ func TestUpstreamBillingProbeSyncsResolvedRateForAllAPIKeyPlatforms(t *testing.T
 		PlatformGrok,
 	} {
 		t.Run(platform, func(t *testing.T) {
+			logs, restore := captureStructuredLog(t)
+			defer restore()
 			initialRate := 0.25
 			account := &Account{
 				ID:             17,
@@ -432,7 +439,10 @@ func TestUpstreamBillingProbeSyncsResolvedRateForAllAPIKeyPlatforms(t *testing.T
 				},
 			}
 			repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
-			svc := newUpstreamBillingProbeTestService(repo, &upstreamBillingProbeHTTPStub{}, &upstreamBillingProbeSettingRepo{})
+			upstream := &upstreamBillingProbeHTTPStub{}
+			svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+			now := time.Date(2026, time.July, 13, 2, 0, 0, 0, time.UTC)
+			svc.now = func() time.Time { return now }
 
 			snapshot, err := svc.ProbeAccount(context.Background(), account.ID)
 
@@ -440,6 +450,19 @@ func TestUpstreamBillingProbeSyncsResolvedRateForAllAPIKeyPlatforms(t *testing.T
 			require.Equal(t, UpstreamBillingProbeStatusOK, snapshot.Status)
 			require.NotNil(t, account.RateMultiplier)
 			require.Equal(t, 0.8, *account.RateMultiplier)
+			require.True(t, logs.ContainsMessageAtLevel("upstream_billing_rate_sync_applied", "info"))
+
+			logs.mu.Lock()
+			logs.events = nil
+			logs.mu.Unlock()
+			now = now.Add(30 * time.Minute)
+			snapshot, err = svc.ProbeAccount(context.Background(), account.ID)
+			require.NoError(t, err)
+			require.Equal(t, int64(2), upstream.calls.Load())
+			require.Equal(t, int64(2), upstream.balanceCalls.Load())
+			require.Equal(t, now, *snapshot.ReceivedAt)
+			require.Same(t, snapshot, account.Extra[UpstreamBillingProbeExtraKey])
+			require.False(t, logs.ContainsMessageAtLevel("upstream_billing_rate_sync_applied", "info"))
 		})
 	}
 }
@@ -800,13 +823,13 @@ func TestUpstreamBillingProbeFailurePreservesLastSuccessAndRetryAfter(t *testing
 	require.Equal(t, initialRate, *account.RateMultiplier)
 }
 
-func TestUpstreamBillingProbeRetryAfterIsNotShortened(t *testing.T) {
+func TestUpstreamBillingProbeRetryAfterIsCappedAtMaxDelay(t *testing.T) {
 	delay := nextProbeDelay(30, 48*time.Hour)
-	require.Equal(t, 48*time.Hour, delay)
+	require.Equal(t, upstreamBillingProbeMaxDelay, delay)
 }
 
 // unsupported 的重探间隔明显长于普通失败，但始终有上界：上游后来接入 sub2api
-// 时最迟一天内会被重新发现，且不会缩短上游 Retry-After 指令。
+// 时最迟一天内会被重新发现，且上游超长 Retry-After 亦受 24h 封顶保护。
 func TestUpstreamBillingProbeUnsupportedDelayIsStretchedAndBounded(t *testing.T) {
 	// 默认 30 分钟 interval：普通失败 24~36 分钟，unsupported 为其 8 倍。
 	stretched := unsupportedProbeDelay(30, 0)
@@ -818,8 +841,8 @@ func TestUpstreamBillingProbeUnsupportedDelayIsStretchedAndBounded(t *testing.T)
 	require.LessOrEqual(t, unsupportedProbeDelay(upstreamBillingProbeMaxIntervalMinutes, 0), upstreamBillingProbeMaxDelay)
 	require.Positive(t, unsupportedProbeDelay(upstreamBillingProbeMinIntervalMinutes, 0))
 
-	// Retry-After 更长时原样保留，不被封顶缩短；更短时至少不早于该指令。
-	require.Equal(t, 48*time.Hour, unsupportedProbeDelay(30, 48*time.Hour))
+	// Retry-After 更长时受封顶保护，不超过 upstreamBillingProbeMaxDelay；更短时至少不早于该指令。
+	require.Equal(t, upstreamBillingProbeMaxDelay, unsupportedProbeDelay(30, 48*time.Hour))
 	require.GreaterOrEqual(t, unsupportedProbeDelay(30, time.Hour), time.Hour)
 }
 

@@ -4,9 +4,12 @@
  */
 
 import { apiClient } from '../client'
-import type { PaginatedResponse } from '@/types'
+import type { PaginatedResponse, PelicanQuestion } from '@/types'
 
 export interface PelicanGroupTestConfig {
+  prompt_mode?: 'custom' | 'random'
+  pelican_question?: PelicanQuestion
+  actual_prompt?: string
   question_kind?: string
   prompt: string
   reasoning_effort: string
@@ -35,6 +38,9 @@ export interface PelicanGroupTestResult {
   response_text?: string
   error_message: string
   latency_ms: number
+  /** USD upstream cost; null means usage or pricing was unavailable. */
+  cost_usd: number | null
+  cost_incomplete: boolean
   pelican_config?: PelicanGroupTestConfig
   started_at: string
   finished_at: string
@@ -45,6 +51,10 @@ export interface PelicanGroupTestPlan {
   id: number
   group_id: number
   group_name: string
+  today_cost_usd: number
+  total_cost_usd: number
+  today_cost_incomplete: boolean
+  total_cost_incomplete: boolean
   group_platform: string
   /** The group's status, or "deleted" once the group was removed. */
   group_status: string
@@ -62,6 +72,7 @@ export interface PelicanGroupTestPlan {
 
 /** What an admin edits. The group of an existing plan cannot change. */
 export interface PelicanGroupTestPlanInput {
+  prompt_mode?: 'custom' | 'random'
   group_id: number
   model_id: string
   cron_expression: string
@@ -73,6 +84,7 @@ export interface PelicanGroupTestPlanInput {
 
 export interface PelicanShowcaseSettings {
   enabled: boolean
+  api_enabled: boolean
   max_items: number
   auto_cleanup: boolean
   retention_days: number

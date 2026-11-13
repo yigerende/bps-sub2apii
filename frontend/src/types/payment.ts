@@ -19,11 +19,23 @@ export type OrderStatus =
   | 'REFUNDED'
   | 'REFUND_FAILED'
 
-export type PaymentType = 'alipay' | 'wxpay' | 'alipay_direct' | 'wxpay_direct' | 'stripe' | 'easypay' | 'airwallex'
+export type BEpusdtPaymentType =
+  | `usdt.${'trc20' | 'erc20' | 'bep20' | 'polygon' | 'aptos' | 'solana' | 'xlayer' | 'arbitrum' | 'plasma' | 'ton'}`
+  | `usdc.${'trc20' | 'erc20' | 'bep20' | 'polygon' | 'aptos' | 'solana' | 'xlayer' | 'arbitrum' | 'base'}`
+  | 'tron.trx' | 'ethereum.eth' | 'bsc.bnb' | 'ton.gram'
+
+export type PaymentType = 'alipay' | 'wxpay' | 'alipay_direct' | 'wxpay_direct' | 'stripe' | 'easypay' | 'airwallex' | 'bepusdt' | BEpusdtPaymentType
 
 export type OrderType = 'balance' | 'subscription'
+export type SubscriptionRenewalMode = 'restart' | 'extend'
 
 // ==================== Configuration ====================
+
+/** 充值赠送档位：支付金额 ≥ min_amount 时在到账基数上赠送 bonus_percent% */
+export interface RechargeBonusTier {
+  min_amount: number
+  bonus_percent: number
+}
 
 export interface PaymentConfig {
   payment_enabled: boolean
@@ -41,7 +53,13 @@ export interface PaymentConfig {
   stripe_publishable_key: string
 }
 
-export interface MethodLimit {
+export interface MethodFeeRates {
+  fee_rate: number
+  fee_rate_min?: number
+  fee_rate_max?: number
+}
+
+export interface MethodLimit extends MethodFeeRates {
   currency?: string
   display_name?: string
   daily_limit: number
@@ -51,6 +69,7 @@ export interface MethodLimit {
   single_max: number
   fee_rate: number
   available: boolean
+  sub_methods?: Record<string, MethodFeeRates>
 }
 
 /** Response from /payment/limits API */
@@ -71,6 +90,12 @@ export interface CheckoutInfoResponse {
   /** Subscription CNY conversion rate (1 USD = X CNY); 0 = disabled, plan price is charged as-is */
   subscription_usd_to_cny_rate: number
   recharge_fee_rate: number
+  /** 充值赠送阶梯（按 min_amount 升序）；缺失/空数组 = 不赠送 */
+  recharge_bonus_tiers?: RechargeBonusTier[]
+  /** 阶梯模式：bonus 赠金 / discount 折扣；缺失按 bonus */
+  recharge_bonus_mode?: string
+  /** 充值页金额区顶部的 Markdown 活动文案；空 = 不展示 */
+  recharge_bonus_notice?: string
   help_text: string
   help_image_url: string
   stripe_publishable_key: string
@@ -89,6 +114,8 @@ export interface PaymentOrder {
   pay_amount: number
   currency?: string
   fee_rate: number
+  /** 充值赠送额度（USD），已计入 amount */
+  bonus_amount?: number
   payment_type: string
   out_trade_no: string
   status: OrderStatus
@@ -103,6 +130,7 @@ export interface PaymentOrder {
   refund_requested_by?: number
   refund_request_reason?: string
   plan_id?: number
+  renewal_mode?: SubscriptionRenewalMode
   provider_instance_id?: string
 }
 
@@ -160,6 +188,10 @@ export interface ProviderInstance {
   payment_mode: string
   refund_enabled: boolean
   allow_user_refund: boolean
+  /** null / absent inherits the global fee; zero explicitly disables fees. */
+  fee_rate?: number | null
+  /** Keys omitted from this map inherit the instance default. */
+  method_fee_rates?: Record<string, number>
   limits: string
   sort_order: number
 }
@@ -169,8 +201,10 @@ export interface ProviderInstance {
 export interface CreateOrderRequest {
   amount: number
   payment_type: string
+  payment_subtype?: string
   order_type: string
   plan_id?: number
+  renewal_mode?: SubscriptionRenewalMode
   return_url?: string
   payment_source?: string
   openid?: string
@@ -200,6 +234,7 @@ export interface WechatJSAPIPayload {
 
 export interface CreateOrderResult {
   order_id: number
+  payment_subtype?: string
   amount: number
   pay_url?: string
   qr_code?: string
@@ -210,6 +245,7 @@ export interface CreateOrderResult {
   payment_env?: string
   pay_amount: number
   fee_rate: number
+  bonus_amount?: number
   expires_at: string
   result_type?: CreateOrderResultType
   payment_type?: string

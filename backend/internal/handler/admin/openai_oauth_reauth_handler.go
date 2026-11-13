@@ -1,9 +1,8 @@
 package admin
 
 import (
-	"crypto/subtle"
+	"encoding/json"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -72,7 +71,20 @@ func (h *OpenAIOAuthReauthHandler) CreateTask(c *gin.Context) {
 	if !ok {
 		return
 	}
-	task, err := h.service.CreateTask(c.Request.Context(), accountID)
+	profile := "codex"
+	if c.Request.ContentLength != 0 {
+		var req struct {
+			OAuthProfile string `json:"oauth_profile"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.BadRequest(c, "Invalid authorization request")
+			return
+		}
+		if req.OAuthProfile != "" {
+			profile = req.OAuthProfile
+		}
+	}
+	task, err := h.service.CreateTaskForProfile(c.Request.Context(), accountID, profile)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -81,7 +93,8 @@ func (h *OpenAIOAuthReauthHandler) CreateTask(c *gin.Context) {
 }
 
 type reauthWorkerRequest struct {
-	WorkerID string `json:"worker_id"`
+	WorkerID string   `json:"worker_id"`
+	Engines  []string `json:"engines"`
 }
 
 type reauthWorkerProgressRequest struct {
@@ -105,15 +118,34 @@ type reauthWorkerFailureRequest struct {
 	Reason   string `json:"reason"`
 }
 
+type sessionExportClaimRequest struct {
+	WorkerID     string   `json:"worker_id"`
+	Capabilities []string `json:"capabilities"`
+}
+
+type sessionExportProgressRequest struct {
+	WorkerID string `json:"worker_id"`
+	Stage    string `json:"stage" binding:"required"`
+}
+
+type sessionExportResultRequest struct {
+	WorkerID string          `json:"worker_id"`
+	Session  json.RawMessage `json:"session" binding:"required"`
+}
+
+type sessionExportFailRequest struct {
+	WorkerID string `json:"worker_id"`
+	Code     string `json:"code"`
+}
+
 func (h *OpenAIOAuthReauthHandler) requireWorker(c *gin.Context) bool {
-	expected := strings.TrimSpace(os.Getenv(openAIOAuthReauthWorkerTokenEnv))
-	if len(expected) < 32 {
+	configured, valid := h.service.WorkerAuthentication(strings.TrimSpace(c.GetHeader("X-OpenAI-Reauth-Worker-Token")))
+	if !configured {
 		response.Error(c, http.StatusServiceUnavailable, "OpenAI re-auth worker is not configured")
 		c.Abort()
 		return false
 	}
-	provided := strings.TrimSpace(c.GetHeader("X-OpenAI-Reauth-Worker-Token"))
-	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+	if !valid {
 		response.Unauthorized(c, "invalid OpenAI re-auth worker token")
 		c.Abort()
 		return false
@@ -133,12 +165,110 @@ func (h *OpenAIOAuthReauthHandler) Claim(c *gin.Context) {
 		response.BadRequest(c, "Invalid worker request")
 		return
 	}
-	claim, err := h.service.ClaimTask(c.Request.Context(), req.WorkerID)
+	claim, err := h.service.ClaimTaskWithEngines(c.Request.Context(), req.WorkerID, req.Engines)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, claim)
+}
+
+func (h *OpenAIOAuthReauthHandler) ClaimSessionExport(c *gin.Context) {
+	if !h.requireWorker(c) {
+		return
+	}
+	var req sessionExportClaimRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid worker request")
+		return
+	}
+	claim, err := h.service.ClaimSessionExportTask(c.Request.Context(), req.WorkerID, req.Capabilities)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, claim)
+}
+
+func (h *OpenAIOAuthReauthHandler) SessionExportProgress(c *gin.Context) {
+	if !h.requireWorker(c) {
+		return
+	}
+	taskID, err := strconv.ParseInt(strings.TrimSpace(c.Param("task_id")), 10, 64)
+	if err != nil || taskID <= 0 {
+		response.BadRequest(c, "Invalid task ID")
+		return
+	}
+	var req sessionExportProgressRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid worker request")
+		return
+	}
+	if err := h.service.UpdateSessionExportStage(c.Request.Context(), taskID, req.WorkerID, req.Stage); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"accepted": true})
+}
+
+func (h *OpenAIOAuthReauthHandler) SessionExportResult(c *gin.Context) {
+	if !h.requireWorker(c) {
+		return
+	}
+	taskID, err := strconv.ParseInt(strings.TrimSpace(c.Param("task_id")), 10, 64)
+	if err != nil || taskID <= 0 {
+		response.BadRequest(c, "Invalid task ID")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	var req sessionExportResultRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid worker request")
+		return
+	}
+	if err := h.service.SubmitSessionExport(c.Request.Context(), taskID, req.WorkerID, req.Session); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"accepted": true})
+}
+
+func (h *OpenAIOAuthReauthHandler) SessionExportFail(c *gin.Context) {
+	if !h.requireWorker(c) {
+		return
+	}
+	taskID, err := strconv.ParseInt(strings.TrimSpace(c.Param("task_id")), 10, 64)
+	if err != nil || taskID <= 0 {
+		response.BadRequest(c, "Invalid task ID")
+		return
+	}
+	var req sessionExportFailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid worker request")
+		return
+	}
+	if err := h.service.FailSessionExport(c.Request.Context(), taskID, req.WorkerID, req.Code); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"accepted": true})
+}
+
+func (h *OpenAIOAuthReauthHandler) RuntimeSettings(c *gin.Context) {
+	if !h.requireWorker(c) {
+		return
+	}
+	h.service.MarkWorkerSeen()
+	cfg, err := h.service.GetRuntimeSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	var count *int
+	if cfg.ConcurrencyConfigured {
+		count = &cfg.WorkerConcurrency
+	}
+	response.Success(c, gin.H{"worker_concurrency": count})
 }
 
 func (h *OpenAIOAuthReauthHandler) Progress(c *gin.Context) {
@@ -215,6 +345,7 @@ func (h *OpenAIOAuthReauthHandler) Fail(c *gin.Context) {
 		response.BadRequest(c, "Invalid task ID")
 		return
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
 	var req reauthWorkerFailureRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid worker request")

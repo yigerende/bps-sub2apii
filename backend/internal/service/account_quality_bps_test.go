@@ -91,7 +91,7 @@ func TestQualityBPSExtraMatchesAccountOptions(t *testing.T) {
 	require.Equal(t, true, extra["openai_excel_bps"])
 	require.Equal(t, []string{"gpt-6-astra"}, extra["openai_excel_bps_models"])
 	require.Equal(t, true, extra[ExcelBPSOmitUnsupportedToolsKey])
-	require.Equal(t, false, extra[ExcelBPSIgnoreImagesKey])
+	require.NotContains(t, extra, "openai_excel_bps_ignore_images")
 	require.Equal(t, true, extra[ExcelBPSIgnoreEncryptedContentKey])
 	require.Equal(t, false, extra["openai_excel_bps_mihomo"])
 	require.Nil(t, extra[ExcelBPS403TargetGroupIDKey])
@@ -165,6 +165,7 @@ func TestQualityUsagePercentIgnoresResetWindows(t *testing.T) {
 func TestQualityBPSEligibleMatchesAccountRules(t *testing.T) {
 	parent := int64(1)
 	require.True(t, QualityBPSEligible(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}))
+	require.False(t, QualityBPSEligible(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"plan_type": "free"}}))
 	require.False(t, QualityBPSEligible(nil))
 	require.False(t, QualityBPSEligible(&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}))
 	require.False(t, QualityBPSEligible(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parent}))

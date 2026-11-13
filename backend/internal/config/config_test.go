@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +22,92 @@ func resetViperWithJWTSecret(t *testing.T) {
 	t.Setenv("CONFIG_FILE", "")
 	t.Setenv("DATA_DIR", "")
 	t.Setenv("JWT_SECRET", strings.Repeat("x", 32))
+	stubMemoryLimit(t, 0)
+}
+
+func stubMemoryLimit(t *testing.T, limit uint64) {
+	t.Helper()
+	original := detectMemoryLimitBytes
+	detectMemoryLimitBytes = func() uint64 { return limit }
+	t.Cleanup(func() { detectMemoryLimitBytes = original })
+}
+
+func TestAutoRequestBodyMemoryBudget(t *testing.T) {
+	require.Equal(t, int64(1<<30), autoRequestBodyMemoryBudget(0))
+	require.Equal(t, int64(1<<30), autoRequestBodyMemoryBudget(2<<30))
+	require.Equal(t, int64(2<<30), autoRequestBodyMemoryBudget(8<<30))
+	require.Equal(t, int64(32<<30), autoRequestBodyMemoryBudget(128<<30))
+	require.Equal(t, int64(math.MaxUint64/4), autoRequestBodyMemoryBudget(math.MaxUint64))
+}
+
+func TestLoadRequestBodyMemoryBudget(t *testing.T) {
+	t.Run("auto-sized from memory limit when unset", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, int64(32<<30), cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
+
+	t.Run("explicit environment value wins, including 0", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		t.Setenv("GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES", "0")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Zero(t, cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
+
+	t.Run("empty environment value is ignored like viper does", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		t.Setenv("GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES", "")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, int64(32<<30), cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
+
+	t.Run("explicit environment value wins over auto-sizing", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		t.Setenv("GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES", "2147483648")
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, int64(2<<30), cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
+
+	t.Run("explicit config file 0 disables the budget", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		configFile := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(configFile, []byte("gateway:\n  request_body_memory_budget_bytes: 0\n"), 0o600))
+		t.Setenv("CONFIG_FILE", configFile)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Zero(t, cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
+
+	t.Run("config file without the key is auto-sized", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		configFile := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(configFile, []byte("gateway:\n  max_body_size: 268435456\n"), 0o600))
+		t.Setenv("CONFIG_FILE", configFile)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, int64(32<<30), cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
+
+	t.Run("explicit config file value wins", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		stubMemoryLimit(t, 128<<30)
+		configFile := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(configFile, []byte("gateway:\n  request_body_memory_budget_bytes: 1073741824\n"), 0o600))
+		t.Setenv("CONFIG_FILE", configFile)
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.Equal(t, int64(1<<30), cfg.Gateway.RequestBodyMemoryBudgetBytes)
+	})
 }
 
 func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
@@ -28,6 +115,42 @@ func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, DefaultModelsListReadMaxBytes, cfg.Gateway.ModelsListReadMaxBytes)
+}
+
+func TestLoadDefaultMinOutputTokens(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 128, cfg.Gateway.MinOutputTokens)
+}
+
+func TestLoadMinOutputTokensFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_MIN_OUTPUT_TOKENS", "16")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 16, cfg.Gateway.MinOutputTokens)
+}
+
+func TestLoadGeminiSameAccountRetries(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 4, cfg.Gateway.MaxSameAccountRetriesGemini)
+
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_MAX_SAME_ACCOUNT_RETRIES_GEMINI", "0")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Zero(t, cfg.Gateway.MaxSameAccountRetriesGemini)
+}
+
+func TestValidateMinOutputTokensMinimum(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	cfg.Gateway.MinOutputTokens = 15
+	require.EqualError(t, cfg.Validate(), "gateway.min_output_tokens must be at least 16")
 }
 
 func TestLoadTimezonePrecedence(t *testing.T) {
@@ -105,6 +228,7 @@ func TestLoadHTTPIngressSafetyDefaults(t *testing.T) {
 	require.Equal(t, 64*1024, cfg.Server.MaxHeaderBytes)
 	require.Empty(t, cfg.Server.TrustedProxies)
 	require.False(t, cfg.Server.TrustedProxiesConfigured)
+	require.Equal(t, []string{"127.0.0.1/32", "::1/128"}, cfg.Server.EffectiveTrustedProxies())
 	require.True(t, cfg.TrustForwardedIPForAPIKeyACL())
 	require.Equal(t, int64(32*1024*1024), cfg.Gateway.TextMaxBodySize)
 	require.True(t, cfg.APIKeyAuth.InvalidAbuse.Enabled)
@@ -240,6 +364,7 @@ func TestLoadExplicitEmptyTrustedProxiesEnablesConfiguredMode(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, cfg.Server.TrustedProxies)
 	require.True(t, cfg.Server.TrustedProxiesConfigured)
+	require.Empty(t, cfg.Server.EffectiveTrustedProxies())
 }
 
 func TestLoadExplicitTrustedProxiesEnablesConfiguredMode(t *testing.T) {
@@ -260,6 +385,7 @@ func TestLoadTrustedProxiesFromEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"127.0.0.1/32", "::1/128"}, cfg.Server.TrustedProxies)
 	require.True(t, cfg.Server.TrustedProxiesConfigured)
+	require.Equal(t, cfg.Server.TrustedProxies, cfg.Server.EffectiveTrustedProxies())
 }
 
 func TestLoadExplicitEmptyTrustedProxiesFromEnvironment(t *testing.T) {
@@ -270,6 +396,7 @@ func TestLoadExplicitEmptyTrustedProxiesFromEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, cfg.Server.TrustedProxies)
 	require.True(t, cfg.Server.TrustedProxiesConfigured)
+	require.Empty(t, cfg.Server.EffectiveTrustedProxies())
 }
 
 func TestLoadTrustedProxiesPresenceFromYAML(t *testing.T) {
@@ -300,6 +427,35 @@ func TestLoadTrustedProxiesPresenceFromYAML(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.want, cfg.Server.TrustedProxies)
 			require.Equal(t, test.configured, cfg.Server.TrustedProxiesConfigured)
+		})
+	}
+}
+
+func TestLoadTrustedProxiesEnvironmentOverridesPersistentYAML(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		setEnv bool
+		value  string
+		want   []string
+	}{
+		{"unset preserves YAML", false, "", []string{"172.18.0.1/32"}},
+		{"explicit empty disables YAML trust", true, "", []string{}},
+		{"list replaces YAML trust", true, "127.0.0.1/32, ::1/128", []string{"127.0.0.1/32", "::1/128"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			configFile := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configFile, []byte("server:\n  trusted_proxies:\n    - 172.18.0.1/32\n"), 0o600))
+			t.Setenv("CONFIG_FILE", configFile)
+			// Register cleanup before unsetting so an inherited value is restored.
+			t.Setenv("SERVER_TRUSTED_PROXIES", tt.value)
+			if !tt.setEnv {
+				require.NoError(t, os.Unsetenv("SERVER_TRUSTED_PROXIES"))
+			}
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.True(t, cfg.Server.TrustedProxiesConfigured)
+			require.Equal(t, tt.want, cfg.Server.EffectiveTrustedProxies())
 		})
 	}
 }
@@ -506,6 +662,9 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	if cfg.Gateway.OpenAIWS.ClientReadLimitBytes != 64*1024*1024 {
 		t.Fatalf("Gateway.OpenAIWS.ClientReadLimitBytes = %d, want %d", cfg.Gateway.OpenAIWS.ClientReadLimitBytes, 64*1024*1024)
 	}
+	if cfg.Gateway.OpenAIWS.SSEAccelerationMaxPayloadBytes != 15*1024*1024 {
+		t.Fatalf("SSEAccelerationMaxPayloadBytes = %d, want 15 MiB", cfg.Gateway.OpenAIWS.SSEAccelerationMaxPayloadBytes)
+	}
 	if !cfg.Gateway.OpenAIWS.HTTPBridgeEnabled {
 		t.Fatalf("Gateway.OpenAIWS.HTTPBridgeEnabled = false, want true")
 	}
@@ -645,12 +804,12 @@ func TestLoadOpenAIHTTP2DisabledFromEnv(t *testing.T) {
 	require.False(t, cfg.Gateway.OpenAIHTTP2.Enabled)
 }
 
-func TestLoadDefaultOpenAIResponseHeaderTimeoutUnlimited(t *testing.T) {
+func TestLoadDefaultOpenAIResponseHeaderTimeoutDisabled(t *testing.T) {
 	resetViperWithJWTSecret(t)
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Equal(t, 0, cfg.Gateway.OpenAIResponseHeaderTimeout)
+	require.Zero(t, cfg.Gateway.OpenAIResponseHeaderTimeout)
 }
 
 func TestLoadOpenAIResponseHeaderTimeoutFromEnv(t *testing.T) {
@@ -660,6 +819,18 @@ func TestLoadOpenAIResponseHeaderTimeoutFromEnv(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 1800, cfg.Gateway.OpenAIResponseHeaderTimeout)
+}
+
+func TestLoadOpenAIResponseHeaderTimeoutFromConfig(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT", "")
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("gateway:\n  openai_response_header_timeout: 45\n"), 0o600))
+	t.Setenv("CONFIG_FILE", configFile)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 45, cfg.Gateway.OpenAIResponseHeaderTimeout)
 }
 
 func TestLoadImageNonstreamKeepaliveFromEnv(t *testing.T) {
@@ -831,6 +1002,7 @@ func TestLoadDefaultSecurityToggles(t *testing.T) {
 
 	wantHosts := []string{
 		"api.kimi.com",
+		"api.kimi.ai",
 		"api.moonshot.ai",
 		"api.moonshot.cn",
 	}
@@ -842,6 +1014,19 @@ func TestLoadDefaultSecurityToggles(t *testing.T) {
 		if _, ok := hostSet[want]; !ok {
 			t.Fatalf("URLAllowlist.UpstreamHosts missing %q; got %v", want, cfg.Security.URLAllowlist.UpstreamHosts)
 		}
+	}
+	opts := urlvalidator.ValidationOptions{
+		AllowedHosts:     cfg.Security.URLAllowlist.UpstreamHosts,
+		RequireAllowlist: true,
+		AllowPrivate:     cfg.Security.URLAllowlist.AllowPrivateHosts,
+	}
+	for _, host := range []string{"api.kimi.com", "api.kimi.ai"} {
+		target := "https://" + host + "/coding/v1/usages"
+		normalized, err := urlvalidator.ValidateHTTPSURL(target, opts)
+		require.NoError(t, err)
+		require.Equal(t, target, normalized)
+		_, err = urlvalidator.ValidateHTTPSURL("https://"+host+".attacker.example/coding/v1/usages", opts)
+		require.Error(t, err)
 	}
 }
 
@@ -1850,6 +2035,16 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.openai_response_header_timeout",
 		},
 		{
+			name:    "gateway gemini same account retries negative",
+			mutate:  func(c *Config) { c.Gateway.MaxSameAccountRetriesGemini = -1 },
+			wantErr: "gateway.max_same_account_retries_gemini",
+		},
+		{
+			name:    "gateway gemini same account retries too large",
+			mutate:  func(c *Config) { c.Gateway.MaxSameAccountRetriesGemini = 11 },
+			wantErr: "gateway.max_same_account_retries_gemini",
+		},
+		{
 			name:    "gateway openai first output timeout below minimum",
 			mutate:  func(c *Config) { c.Gateway.OpenAIFirstOutputTimeoutSeconds = 29 },
 			wantErr: "gateway.openai_first_output_timeout_seconds",
@@ -1888,6 +2083,16 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway concurrency slot ttl",
 			mutate:  func(c *Config) { c.Gateway.ConcurrencySlotTTLMinutes = 0 },
 			wantErr: "gateway.concurrency_slot_ttl_minutes",
+		},
+		{
+			name:    "gateway api key slot ttl negative",
+			mutate:  func(c *Config) { c.Gateway.APIKeySlotTTLSeconds = -1 },
+			wantErr: "gateway.api_key_slot_ttl_seconds",
+		},
+		{
+			name:    "gateway api key slot ttl below minimum",
+			mutate:  func(c *Config) { c.Gateway.APIKeySlotTTLSeconds = 29 },
+			wantErr: "gateway.api_key_slot_ttl_seconds",
 		},
 		{
 			name:    "gateway max conns per host",
@@ -1948,6 +2153,12 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway stream data interval range",
 			mutate:  func(c *Config) { c.Gateway.StreamDataIntervalTimeout = 5 },
 			wantErr: "gateway.stream_data_interval_timeout",
+		},
+		{
+			name: "gateway BPS progress interval range", mutate: func(c *Config) { c.Gateway.ExcelBPSStreamDataIntervalTimeout = 5 }, wantErr: "gateway.excel_bps_stream_data_interval_timeout",
+		},
+		{
+			name: "gateway BPS progress interval negative", mutate: func(c *Config) { c.Gateway.ExcelBPSStreamDataIntervalTimeout = -1 }, wantErr: "gateway.excel_bps_stream_data_interval_timeout",
 		},
 		{
 			name:    "gateway stream data interval negative",
@@ -2396,6 +2607,11 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 			wantErr: "gateway.openai_scheduler.sticky_escape_ttft_ms",
 		},
 		{
+			name:    "strict session group IDs must be positive",
+			mutate:  func(c *Config) { c.Gateway.OpenAIScheduler.StrictSessionAffinityGroupIDs = []int64{0} },
+			wantErr: "gateway.openai_scheduler.strict_session_affinity_group_ids",
+		},
+		{
 			name:    "sticky_escape_error_rate 不能小于 0",
 			mutate:  func(c *Config) { c.Gateway.OpenAIScheduler.StickyEscapeErrorRate = -0.1 },
 			wantErr: "gateway.openai_scheduler.sticky_escape_error_rate",
@@ -2608,6 +2824,9 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	if cfg.Gateway.StreamDataIntervalTimeout != 180 {
 		t.Fatalf("stream_data_interval_timeout = %d, want 180", cfg.Gateway.StreamDataIntervalTimeout)
 	}
+	if cfg.Gateway.ExcelBPSStreamDataIntervalTimeout != 120 {
+		t.Fatalf("excel_bps_stream_data_interval_timeout = %d, want 120", cfg.Gateway.ExcelBPSStreamDataIntervalTimeout)
+	}
 	if cfg.Gateway.StreamKeepaliveInterval != 10 {
 		t.Fatalf("stream_keepalive_interval = %d, want 10", cfg.Gateway.StreamKeepaliveInterval)
 	}
@@ -2676,5 +2895,17 @@ func TestLoadSimpleModeAutoCreateDefaultGroups(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestOpenAIWSSSEPayloadLimitConfig(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_WS_SSE_ACCELERATION_MAX_PAYLOAD_BYTES", "1048576")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.EqualValues(t, 1048576, cfg.Gateway.OpenAIWS.SSEAccelerationMaxPayloadBytes)
+	for _, limit := range []int64{0, -1} {
+		cfg.Gateway.OpenAIWS.SSEAccelerationMaxPayloadBytes = limit
+		require.ErrorContains(t, cfg.Validate(), "sse_acceleration_max_payload_bytes must be positive")
 	}
 }

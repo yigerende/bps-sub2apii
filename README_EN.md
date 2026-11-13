@@ -6,7 +6,7 @@
 
 # bps-sub2api
 
-[![Go](https://img.shields.io/badge/Go-1.27.0-00ADD8.svg)](https://golang.org/)
+[![Go](https://img.shields.io/badge/Go-1.27.4-00ADD8.svg)](https://golang.org/)
 [![Vue](https://img.shields.io/badge/Vue-3.4+-4FC08D.svg)](https://vuejs.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-336791.svg)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-7+-DC382D.svg)](https://redis.io/)
@@ -53,10 +53,10 @@ Sub2API is an AI API gateway platform designed to distribute and manage API quot
 
 | Component | Technology |
 |-----------|------------|
-| Backend | Go 1.27.0, Gin, Ent |
+| Backend | Go 1.27.4, Gin, Ent |
 | Frontend | Vue 3.4+, Vite 5+, TailwindCSS |
 | Database | PostgreSQL 15+ |
-| Cache/Queue | Redis 7+ |
+| Cache/Queue | Redis 6.0+ |
 
 ---
 
@@ -82,7 +82,7 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 
 - Linux server (amd64 or arm64)
 - PostgreSQL 15+ (installed and running)
-- Redis 7+ (installed and running)
+- Redis 6.0+ (installed and running)
 - Root privileges
 
 #### Installation Steps
@@ -207,8 +207,9 @@ JWT_SECRET=your_jwt_secret_here
 TOTP_ENCRYPTION_KEY=your_totp_key_here
 
 # Optional: Admin account
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=your_admin_password
+# Leave empty to generate a random login email and password on first startup.
+ADMIN_EMAIL=
+ADMIN_PASSWORD=
 
 # Optional: Custom port
 SERVER_PORT=8080
@@ -257,9 +258,9 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 Open `http://YOUR_SERVER_IP:8080` in your browser.
 
-If admin password was auto-generated, find it in logs:
+If the admin email (login username) or password was auto-generated, find them in logs:
 ```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
+docker compose -f docker-compose.local.yml logs sub2api | grep "Generated admin"
 ```
 
 #### Upgrade
@@ -333,7 +334,7 @@ Build and run from source code for development or customization.
 - Go 1.21+
 - Node.js 18+
 - PostgreSQL 15+
-- Redis 7+
+- Redis 6.0+
 
 #### Build Steps
 
@@ -744,3 +745,11 @@ Copyright (c) 2026 Wesley Liddick
 **If you find this project useful, please give it a star!**
 
 </div>
+
+## OpenAI Image Output Formats
+
+On `/v1/images/generations` and `/v1/images/edits`, OAuth / Setup Token requests for GPT Image 1.5, 2, 2.5 and 2.6 (after model mapping) use Codex-native Images endpoints. Pre-2.6 models retain Responses fallback for endpoint 404/405; 2.6 does not fall back. `output_format` and `output_compression` are forwarded, but upstream account and endpoint capabilities determine the output. A 4xx rejection or HTTP 200 containing PNG data and `output_format: "png"` is possible even when requesting JPEG or SVG.
+
+A JPEG format mismatch has also been reported for `gpt-image-2.5-flare`.
+
+Compare the returned `output_format` (including per-image values) with the request and verify the actual image format before saving or serving it. Filename extensions and MIME types must match actual output. A successful image response retains its status, content and usage even when the format differs; automatically retrying may generate and bill another image.

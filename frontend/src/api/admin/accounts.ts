@@ -1,3 +1,4 @@
+import type { AccountPerformance, PerformanceConfig, PerformanceEvent } from '@/types/accountPerformance'
 /**
  * Admin Accounts API endpoints
  * Handles AI platform account management for administrators
@@ -26,6 +27,9 @@ import type {
   OpenAICodexPATCreateRequest,
   CheckMixedChannelRequest,
   CheckMixedChannelResponse,
+  NewAPIUpstreamConfig,
+  NewAPIUpstreamConfigRequest,
+  NewAPIUpstreamPreview,
   UpstreamBillingProbeResult,
   UpstreamBillingProbeSettings,
   UpstreamBillingRatesResponse,
@@ -33,9 +37,18 @@ import type {
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
   GrokMediaEligibilityState,
+  GrokModelDiagnostics,
   OpenCodeGoUsageSettings,
   OpenCodeGoUsageState
 } from '@/types'
+
+/** Current account slots in use, independent of dashboard history and ops settings. */
+export async function getConcurrencySummary(): Promise<{ current_concurrency: number }> {
+  const { data } = await apiClient.get<{ current_concurrency: number }>(
+    '/admin/accounts/concurrency-summary'
+  )
+  return data
+}
 
 /**
  * List all accounts with pagination
@@ -610,10 +623,33 @@ export async function getAvailableModels(id: number): Promise<ClaudeModel[]> {
   return data
 }
 
+export interface AccountTestReasoning {
+  supported_reasoning_levels: string[]
+  default_reasoning_level: string
+}
+
+export async function getModelReasoning(id: number, modelId: string): Promise<AccountTestReasoning> {
+  const { data } = await apiClient.get<AccountTestReasoning>(`/admin/accounts/${id}/models/reasoning`, {
+    params: { model_id: modelId }
+  })
+  return data
+}
+
 export interface SyncUpstreamModelsResult {
   models: string[]
   metadata?: Record<string, UpstreamModelMetadata>
   warnings?: UpstreamModelSyncWarning[]
+  discovery_source?: 'upstream' | 'configured_fallback'
+  grok_model_diagnostics?: GrokModelDiagnostics
+  applied?: boolean
+  changed?: boolean
+  skipped?: string
+  next_sync_at?: string
+}
+
+export interface SyncUpstreamModelsOptions {
+  apply?: boolean
+  automatic?: boolean
 }
 
 export interface UpstreamModelSyncWarning {
@@ -639,8 +675,12 @@ export interface UpstreamModelMetadata {
  * @param id - Account ID
  * @returns List of model IDs returned by the upstream
  */
-export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResult> {
-  const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`)
+export async function syncUpstreamModels(
+  id: number,
+  options?: SyncUpstreamModelsOptions,
+  request?: { signal?: AbortSignal }
+): Promise<SyncUpstreamModelsResult> {
+  const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`, options, request)
   return data
 }
 
@@ -649,6 +689,7 @@ export interface SyncUpstreamPreviewParams {
   type: string
   base_url?: string
   api_key: string
+  proxy_id?: number
   model_mapping?: Record<string, string>
 }
 
@@ -769,9 +810,10 @@ export async function importData(payload: {
   return data
 }
 
-export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
+export async function importCodexSession(payload: CodexSessionImportRequest, options?: { signal?: AbortSignal }): Promise<CodexSessionImportResult> {
   const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
-    timeout: 120000 // 120s timeout for large session imports
+    timeout: 120000, // 120s timeout for large session imports
+    signal: options?.signal
   })
   return data
 }
@@ -1028,6 +1070,26 @@ export async function createSparkShadow(parentId: number, payload: SparkShadowCr
   return data
 }
 
+export async function getNewAPIUpstreamConfig(id: number): Promise<NewAPIUpstreamConfig> {
+  const { data } = await apiClient.get<NewAPIUpstreamConfig>(`/admin/accounts/${id}/upstream-billing-probe/config`)
+  return data
+}
+
+export async function previewNewAPIUpstreamConfig(id: number, request: NewAPIUpstreamConfigRequest): Promise<NewAPIUpstreamPreview> {
+  const { data } = await apiClient.post<NewAPIUpstreamPreview>(`/admin/accounts/${id}/upstream-billing-probe/config/preview`, request)
+  return data
+}
+
+export async function saveNewAPIUpstreamConfig(id: number, request: NewAPIUpstreamConfigRequest): Promise<NewAPIUpstreamPreview> {
+  const { data } = await apiClient.put<NewAPIUpstreamPreview>(`/admin/accounts/${id}/upstream-billing-probe/config`, request)
+  return data
+}
+
+export async function deleteNewAPIUpstreamConfig(id: number): Promise<{ account_id: number; configured: false }> {
+  const { data } = await apiClient.delete<{ account_id: number; configured: false }>(`/admin/accounts/${id}/upstream-billing-probe/config`)
+  return data
+}
+
 export async function getUpstreamBillingProbeSettings(): Promise<UpstreamBillingProbeSettings> {
   const { data } = await apiClient.get<UpstreamBillingProbeSettings>('/admin/accounts/upstream-billing-probe/settings')
   return data
@@ -1166,11 +1228,19 @@ export interface CodexHarvestFlowTicket {
 }
 
 export interface CodexHarvestFlowAccount {
+  coverage?: {
+    started_at: string
+    updated_at: string
+    ready_seconds: number
+    missing_seconds: number
+    percent: number | null
+  }
   id: number
   name: string
   status: string
   schedulable: boolean
   skip_harvest?: boolean
+  harvest_selected?: boolean
   in_scope?: boolean
   availability?: string
   recover_at?: string
@@ -1214,7 +1284,18 @@ export interface CodexHarvestFlowEvent {
   detail?: string
 }
 
+export interface CodexHarvestCoverage {
+  started_at?: string
+  updated_at?: string
+  account_count: number
+  average_ready_seconds: number
+  average_missing_seconds: number
+  average_percent: number | null
+  sample_interval_seconds: number
+}
+
 export interface CodexHarvestFlowSnapshot {
+  coverage?: CodexHarvestCoverage
   generated_at: string
   harvest: {
     enabled: boolean
@@ -1394,7 +1475,15 @@ export async function refreshOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsag
   return data
 }
 
+export async function getOpenAIRequestTimezones(): Promise<{ default: string; timezones: string[] }> {
+  const { data } = await apiClient.get<{ default: string; timezones: string[] }>('/admin/accounts/openai-request-timezones')
+  return data
+}
+
 export const accountsAPI = {
+  getConcurrencySummary,
+ getPerformance, savePerformance, releasePerformance, getPerformanceEvents,
+  getOpenAIRequestTimezones,
   list,
   listWithEtag,
   getUpstreamBillingRatesWithEtag,
@@ -1423,6 +1512,7 @@ export const accountsAPI = {
   resetTempUnschedulable,
   setSchedulable,
   getAvailableModels,
+  getModelReasoning,
   syncUpstreamModels,
   syncUpstreamModelsPreview,
   generateAuthUrl,
@@ -1447,6 +1537,10 @@ export const accountsAPI = {
   refreshOpenAIQuota,
   resetOpenAIQuota,
   createSparkShadow,
+  getNewAPIUpstreamConfig,
+  previewNewAPIUpstreamConfig,
+  saveNewAPIUpstreamConfig,
+  deleteNewAPIUpstreamConfig,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,
   setUpstreamBillingProbeEnabled,
@@ -1472,7 +1566,22 @@ export const accountsAPI = {
 
 export default accountsAPI
 
-export async function getManagementCapabilities(): Promise<{ web_search_enabled: boolean; account_quota_notify_enabled: boolean }> {
+export async function getManagementCapabilities(): Promise<{ web_search_enabled: boolean; account_quota_notify_enabled: boolean; concurrency_upgrade_enabled?: boolean }> {
   const { data } = await apiClient.get('/admin/accounts/management-capabilities')
   return data
+}
+
+export async function getPerformance(accountIds: number[], signal?: AbortSignal): Promise<Record<number, AccountPerformance>> {
+ const {data}=await apiClient.post<Record<number, AccountPerformance>>('/admin/accounts/performance',{account_ids:accountIds},{signal})
+ return data
+}
+export async function savePerformance(id:number,config:PerformanceConfig,revision:number): Promise<void> {
+ await apiClient.put('/admin/accounts/'+id+'/performance',{config,revision})
+}
+export async function releasePerformance(id:number,revision:number,pauseGeneration:number): Promise<void> {
+ await apiClient.post('/admin/accounts/'+id+'/performance/release',{revision,pause_generation:pauseGeneration})
+}
+export async function getPerformanceEvents(id:number): Promise<PerformanceEvent[]> {
+ const {data}=await apiClient.get<PerformanceEvent[]>('/admin/accounts/'+id+'/performance/events')
+ return data
 }

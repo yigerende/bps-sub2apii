@@ -67,17 +67,13 @@ import { cnBalanceCellVisible } from './credentialsBuilder'
 
 const props = defineProps<{
   account: Account
+  probedBalance?: CNProviderBalanceResult | null
 }>()
 
 const { t } = useI18n()
 
-const readMode = (): string => {
-  const mode = props.account.credentials?.account_mode
-  return typeof mode === 'string' ? mode : ''
-}
-
 // 仅 kimi / deepseek payg 账号有公开余额端点（智谱 payg 无）。
-const visible = computed(() => cnBalanceCellVisible(props.account.platform, readMode()))
+const visible = computed(() => cnBalanceCellVisible(props.account))
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -105,12 +101,17 @@ const snapshotBalances = computed<CNProviderBalanceEntry[]>(() => {
     return [{ currency, balance }]
   })
 })
-const balanceLow = computed(() => props.account.extra?.[extraKey('balance_low')] === true)
+const balanceLow = computed(() => {
+  if (data.value && data.value.success) return !data.value.available
+  return props.account.extra?.[extraKey('balance_low')] === true
+})
 
 // 优先用探测结果，其次落库快照。多币种返回全部明细，否则主币种单条。
 const currentEntries = computed<CNProviderBalanceEntry[]>(() => {
   if (data.value && data.value.success) {
-    if (data.value.balances && data.value.balances.length > 0) return data.value.balances
+    if (data.value.balances && data.value.balances.length > 0) {
+      return data.value.balances
+    }
     return [{ currency: data.value.currency || '', balance: data.value.balance }]
   }
   if (snapshotBalances.value.length > 0) return snapshotBalances.value
@@ -172,6 +173,17 @@ const handleProbe = async () => {
     loading.value = false
   }
 }
+
+watch(
+  () => props.probedBalance,
+  (val) => {
+    if (val && val.success) {
+      data.value = val
+      error.value = null
+    }
+  },
+  { immediate: true }
+)
 
 watch(
   () => props.account.id,

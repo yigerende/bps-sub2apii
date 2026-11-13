@@ -19,7 +19,7 @@ func TestPelicanSchedulePersistenceLeaseAndRetention(t *testing.T) {
 	plans := NewScheduledTestPlanRepository(integrationDB)
 	results := NewScheduledTestResultRepository(integrationDB)
 	svc := service.NewScheduledTestService(plans, results)
-	config := &service.PelicanTestConfig{Prompt: "<pelican>", ReasoningEffort: "medium", ParallelCount: 2}
+	config := &service.PelicanTestConfig{RuleName: "Saved test rule", Prompt: "<pelican>", ReasoningEffort: "medium", ParallelCount: 2}
 	plan, err := svc.CreatePlan(ctx, &service.ScheduledTestPlan{AccountID: account, ModelID: "gpt-6-astra", CronExpression: "*/30 * * * *", Enabled: true, MaxResults: 2, PelicanConfig: config})
 	require.NoError(t, err)
 	require.Equal(t, config, plan.PelicanConfig)
@@ -31,11 +31,19 @@ func TestPelicanSchedulePersistenceLeaseAndRetention(t *testing.T) {
 	now := time.Now().Truncate(time.Microsecond)
 	_, err = integrationDB.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=$2 WHERE id=$1`, plan.ID, now.Add(-time.Minute))
 	require.NoError(t, err)
+	stalePlan := *plan
+	plan, err = plans.GetByID(ctx, plan.ID)
+	require.NoError(t, err)
 	until := now.Add(15 * time.Minute)
-	claimed, err := plans.ClaimPelican(ctx, plan, now, until, now.Add(30*time.Minute))
+	claimed, err := plans.ClaimPelican(ctx, &stalePlan, now, until, now.Add(30*time.Minute))
+	require.NoError(t, err)
+	require.False(t, claimed, "a changed due time invalidates the stale plan snapshot")
+	claimed, err = plans.ClaimPelican(ctx, plan, now, until, now.Add(30*time.Minute))
 	require.NoError(t, err)
 	require.True(t, claimed)
 	_, err = integrationDB.ExecContext(ctx, `UPDATE scheduled_test_plans SET next_run_at=$2 WHERE id=$1`, second.ID, now.Add(-time.Minute))
+	require.NoError(t, err)
+	second, err = plans.GetByID(ctx, second.ID)
 	require.NoError(t, err)
 	claimed, err = plans.ClaimPelican(ctx, second, now, until, now.Add(30*time.Minute))
 	require.NoError(t, err)
@@ -121,20 +129,34 @@ func TestPelicanHistoryReturnsEveryRetainedOutputAcrossAccounts(t *testing.T) {
 		_, err = results.Create(ctx, &service.ScheduledTestResult{PlanID: legacy.ID, Status: "success", StartedAt: now, FinishedAt: now})
 		require.NoError(t, err)
 	}
-	var found []*service.PelicanHistoryResult
-	cursor := int64(0)
-	for {
-		page, err := svc.ListPelicanHistory(ctx, cursor, 2)
-		require.NoError(t, err)
-		found = append(found, page.Items...)
-		if page.NextCursor == 0 {
-			break
+	collect := func(accountID int64) []*service.PelicanHistoryResult {
+		var found []*service.PelicanHistoryResult
+		cursor := int64(0)
+		for {
+			page, err := svc.ListPelicanHistory(ctx, cursor, 2, accountID)
+			require.NoError(t, err)
+			found = append(found, page.Items...)
+			if page.NextCursor == 0 {
+				break
+			}
+			if cursor > 0 {
+				require.Less(t, page.NextCursor, cursor)
+			}
+			cursor = page.NextCursor
 		}
-		if cursor > 0 {
-			require.Less(t, page.NextCursor, cursor)
-		}
-		cursor = page.NextCursor
+		return found
 	}
+	// The IQ test's records window pages one account with the same cursor.
+	for i, want := range [][]int64{ids[:6], ids[6:]} {
+		scoped := collect(accountIDs[i])
+		scopedIDs := make([]int64, 0, len(scoped))
+		for _, result := range scoped {
+			require.Equal(t, accountIDs[i], result.AccountID)
+			scopedIDs = append(scopedIDs, result.ID)
+		}
+		require.ElementsMatch(t, want, scopedIDs)
+	}
+	found := collect(0)
 	require.Len(t, found, 7)
 	actual := make([]int64, 0)
 	failed := 0

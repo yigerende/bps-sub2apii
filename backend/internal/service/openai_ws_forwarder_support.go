@@ -77,6 +77,11 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	}
 	prewarmPayload["generate"] = false
 	prewarmPayloadJSON := payloadAsJSONBytes(prewarmPayload)
+	// wsjson.Write adds a newline. The extra generate=false field may exceed
+	// the limit even when the validated main request fits exactly.
+	if decision.Reason == openAIOAuthWSSSEAccelerationReason && int64(len(prewarmPayloadJSON))+1 > s.openAIWSSSEMaxPayloadBytes() {
+		return errOpenAIWSSSEPayloadTooLarge
+	}
 
 	if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
 		return err
@@ -326,6 +331,7 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 	if eventType != "error" {
 		return
 	}
+	s.rateLimitService.observeQualityStatus(ctx, account, openAIStreamFailureStatus(payload, extractOpenAISSEErrorMessage(payload)))
 	status := openAIWSPayloadTransientStatus(payload)
 	if status != 0 {
 		if status == http.StatusTooManyRequests {
@@ -341,6 +347,7 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) bool {
 	message := extractOpenAISSEErrorMessage(payload)
 	status := openAIStreamFailureStatus(payload, message)
+	s.rateLimitService.observeQualityStatus(ctx, account, status)
 	switch status {
 	case http.StatusUnauthorized, http.StatusTooManyRequests, 529:
 		s.handleOpenAIStreamTerminalAccountSideEffects(nil, account, payload, message, headers, canonicalModel)
@@ -363,6 +370,9 @@ func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx conte
 
 func (s *OpenAIGatewayService) handleOpenAIWSDialTransientFailure(ctx context.Context, account *Account, canonicalModel string, err error) {
 	var dialErr *openAIWSDialError
+	if errors.As(err, &dialErr) && dialErr != nil {
+		s.rateLimitService.observeQualityStatus(ctx, account, dialErr.StatusCode)
+	}
 	if !errors.As(err, &dialErr) || dialErr == nil || !shouldCooldownOpenAITransientUpstreamError(dialErr.StatusCode, dialErr.ResponseBody) {
 		return
 	}
@@ -428,6 +438,7 @@ func populateOpenAIUsageFromResponseJSON(body []byte, usage *OpenAIUsage) {
 		return
 	}
 	if parsed, ok := extractOpenAIUsageFromJSONBytes(body); ok {
+		mergeOpenAIProtectionUsageEvidence(*usage, &parsed)
 		*usage = parsed
 	}
 }
@@ -574,7 +585,7 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 		_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 		return 0, nil, "", nil
 	}
-	if requestedModel != "" && !account.IsModelSupportedInGroup(groupID, requestedModel) {
+	if requestedModel != "" && (!supportsOpenAIRequestModel(account, requestedModel, requireCompact) || !account.IsModelAllowedInGroup(groupID, requestedModel)) {
 		return 0, nil, "", nil
 	}
 	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {
@@ -613,7 +624,7 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}
-		if requestedModel != "" && !latest.IsModelSupportedInGroup(groupID, requestedModel) {
+		if requestedModel != "" && (!supportsOpenAIRequestModel(latest, requestedModel, requireCompact) || !latest.IsModelAllowedInGroup(groupID, requestedModel)) {
 			return 0, nil, "", nil
 		}
 		if !latest.SupportsOpenAIEndpointCapability(requiredCapability) {

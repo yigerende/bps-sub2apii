@@ -28,7 +28,7 @@ func (r *turnAdmissionRepo) GetOpenAITurnAdmission(context.Context, int64) (*Acc
 }
 
 func TestOpenAITurnAdmissionLatestState(t *testing.T) {
-	for _, change := range []string{"disabled", "paused", "expired", "removed_group", "deleted", "db_error", "binding", "credentials", "credential_route", "platform", "cooldown", "model_block", "persisted_model_limit", "fingerprint", "ws_mode", "proxy_endpoint"} {
+	for _, change := range []string{"disabled", "paused", "expired", "removed_group", "deleted", "db_error", "binding", "credentials", "credential_route", "platform", "cooldown", "model_block", "persisted_model_limit", "quality_isolation", "fingerprint", "ws_mode", "proxy_endpoint"} {
 		t.Run(change, func(t *testing.T) {
 			selected := ticketTestAccount(901)
 			selected.GroupIDs = []int64{9}
@@ -78,6 +78,8 @@ func TestOpenAITurnAdmissionLatestState(t *testing.T) {
 				latest.Extra[modelRateLimitsKey] = map[string]any{
 					"gpt-6-astra": map[string]any{"rate_limit_reset_at": time.Now().Add(time.Hour).Format(time.RFC3339)},
 				}
+			case "quality_isolation":
+				latest.Extra[QualityModelIsolationKey] = map[string]any{"gpt-6-astra": map[string]any{"reason": "quality_rule:7"}}
 			case "fingerprint":
 				latest.Extra[codexFingerprintSeedExtraKey] = "changed-synthetic-seed"
 			case "ws_mode":
@@ -104,6 +106,31 @@ func TestOpenAITurnAdmissionLatestState(t *testing.T) {
 	}
 }
 
+func TestOpenAITurnAdmissionLocalCache(t *testing.T) {
+	selected := ticketTestAccount(980)
+	selected.GroupIDs = []int64{9}
+	latest := *selected
+	latest.Credentials = maps.Clone(selected.Credentials)
+	latest.Extra = maps.Clone(selected.Extra)
+	repo := &turnAdmissionRepo{account: &latest}
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.OpenAITurnAdmissionCacheTTLSeconds = 300
+	svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	group := int64(9)
+	c.Set("api_key", &APIKey{GroupID: &group})
+
+	first, err := svc.admitOpenAITurn(context.Background(), c, selected, "gpt-6-astra")
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.reads)
+	first.Credentials["base_url"] = "https://mutated.example.invalid"
+
+	second, err := svc.admitOpenAITurn(context.Background(), c, selected, "gpt-6-astra")
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.reads, "cache hit must avoid another authoritative read")
+	require.NotEqual(t, "https://mutated.example.invalid", second.Credentials["base_url"])
+}
+
 func TestOpenAITurnAdmissionExplicitGroupRejectsRemovedMembership(t *testing.T) {
 	selected := ticketTestAccount(905)
 	selected.GroupIDs = []int64{9}
@@ -112,7 +139,7 @@ func TestOpenAITurnAdmissionExplicitGroupRejectsRemovedMembership(t *testing.T) 
 	repo := &turnAdmissionRepo{account: &latest}
 	s := &OpenAIGatewayService{accountRepo: repo}
 
-	_, err := s.admitOpenAITurnForGroup(context.Background(), 9, selected, "gpt-5.5")
+	_, err := s.admitOpenAITurnForGroup(context.Background(), 9, true, selected, "gpt-5.5")
 
 	require.True(t, IsOpenAITurnAdmissionError(err), "%v", err)
 	var denied *OpenAITurnAdmissionError
@@ -426,4 +453,22 @@ func TestOpenAITurnAdmissionBindingUsesFinalHeaders(t *testing.T) {
 	require.NotNil(t, conn.turnBinding.ticket)
 	require.Equal(t, "factory-session", conn.handshakeCompatibility.sessionIDUnderscore)
 	require.NoError(t, s.checkOpenAIWSBinding(a, "gpt-6-astra", conn.turnBinding))
+}
+
+func TestQualityIsolationAllowsOnlyInternalRecoveryProbeAdmission(t *testing.T) {
+	selected := ticketTestAccount(901)
+	latest := *selected
+	latest.Extra = maps.Clone(selected.Extra)
+	if latest.Extra == nil {
+		latest.Extra = map[string]any{}
+	}
+	latest.Extra[QualityModelIsolationKey] = map[string]any{"gpt-6-astra": map[string]any{"reason": "quality_rule:7"}}
+	repo := &turnAdmissionRepo{account: &latest}
+	s := &OpenAIGatewayService{accountRepo: repo}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	_, err := s.admitOpenAITurn(context.Background(), c, selected, "gpt-6-astra")
+	require.True(t, IsOpenAITurnAdmissionError(err))
+	ctx := context.WithValue(context.Background(), qualityProbeContextKey{}, true)
+	_, err = s.admitOpenAITurn(ctx, c, selected, "gpt-6-astra")
+	require.NoError(t, err, "the model must remain testable for independent recovery")
 }

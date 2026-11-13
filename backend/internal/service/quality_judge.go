@@ -16,16 +16,21 @@ import (
 
 // The provider/model is supplied by the operator, never inferred from a model name.
 type QualityJudgeConfig struct {
+	// Empty preserves the ordinary LLM path used by existing plans.
+	Kind    string `json:"kind,omitempty"`
 	GroupID int64  `json:"group_id"`
 	ModelID string `json:"model_id"`
 	Prompt  string `json:"prompt"`
 }
 type QualityJudgment struct {
-	Verdict   string `json:"verdict"`
-	Reason    string `json:"reason"`
-	AccountID int64  `json:"account_id,omitempty"`
-	GroupID   int64  `json:"group_id,omitempty"`
-	ModelID   string `json:"model_id,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	RulesVersion string `json:"rules_version,omitempty"`
+	LatencyMS    int64  `json:"latency_ms,omitempty"`
+	Verdict      string `json:"verdict"`
+	Reason       string `json:"reason"`
+	AccountID    int64  `json:"account_id,omitempty"`
+	GroupID      int64  `json:"group_id,omitempty"`
+	ModelID      string `json:"model_id,omitempty"`
 }
 
 type qualityJudgeAccounts interface {
@@ -43,10 +48,11 @@ type QualityJudgeService struct {
 	groups   qualityJudgeGroups
 	slots    qualityJudgeSlots
 	request  func(context.Context, int64, string, string) (string, error)
+	jev      *qualityJevJudge
 }
 
-func NewQualityJudgeService(accounts AccountRepository, groups GroupRepository, slots *ConcurrencyService, tests *AccountTestService) *QualityJudgeService {
-	return &QualityJudgeService{accounts: accounts, groups: groups, slots: slots, request: tests.runQualityJudgeRequest}
+func NewQualityJudgeService(accounts AccountRepository, groups GroupRepository, slots *ConcurrencyService, tests *AccountTestService, moderation *ContentModerationService) *QualityJudgeService {
+	return &QualityJudgeService{accounts: accounts, groups: groups, slots: slots, request: tests.runQualityJudgeRequest, jev: newQualityJevJudge(moderation, tests)}
 }
 
 func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cfg *PelicanTestConfig, answer string) *QualityJudgment {
@@ -55,6 +61,14 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 		return result
 	}
 	judge := cfg.Quality.Judge
+	if judge.Kind == "jev" {
+		// Jev must never fall through to business account selection.
+		return s.judgeJev(ctx, cfg, answer)
+	}
+	if judge.Kind != "" && judge.Kind != "llm" {
+		result.Reason = "judge_invalid_config"
+		return result
+	}
 	result.GroupID = judge.GroupID
 	result.ModelID = judge.ModelID
 	if len(answer) > 64000 {
@@ -77,15 +91,13 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 		result.Reason = "judge_accounts_unavailable"
 		return result
 	}
-	sort.SliceStable(accounts, func(i, j int) bool { return accounts[i].Priority < accounts[j].Priority })
+	accounts = qualityJudgeCandidates(accounts, testedAccount, judge)
 	prompt := qualityJudgePrompt(cfg, answer)
 	result.Reason = "judge_no_available_account"
-	attempts := 0
 	for i := range accounts {
 		account := &accounts[i]
-		// The tested account must not grade its own response, even in the same group.
-		if account.ID == testedAccount || !account.IsSchedulable() || !account.IsModelSupportedInGroup(&judge.GroupID, judge.ModelID) {
-			continue
+		if ctx.Err() != nil {
+			break
 		}
 		slot, err := s.slots.AcquireAccountSlot(ctx, account.ID, account.Concurrency)
 		if err != nil {
@@ -95,12 +107,14 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 		if slot == nil || !slot.Acquired {
 			continue
 		}
-		attempts++
 		output, requestErr := func() (string, error) {
 			if slot.ReleaseFunc != nil {
 				defer slot.ReleaseFunc()
 			}
-			return s.request(ctx, account.ID, judge.ModelID, prompt)
+			// A slow route must leave time for another candidate within the overall deadline.
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, 30*time.Second)
+			defer cancelAttempt()
+			return s.request(attemptCtx, account.ID, judge.ModelID, prompt)
 		}()
 		result.AccountID = account.ID
 		if requestErr != nil {
@@ -115,11 +129,54 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 			}
 			result.Reason = "judge_invalid_response"
 		}
-		if attempts >= 3 || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 	}
 	return result
+}
+
+// Interleave upstream routes before revisiting one with a different credential.
+// Routing identity is only an ordering hint: accounts on the same route may have
+// different model permissions, so a rejected request must not exclude its peers.
+func qualityJudgeCandidates(accounts []Account, testedAccount int64, judge *QualityJudgeConfig) []Account {
+	candidates := make([]Account, 0, len(accounts))
+	seen := make(map[int64]bool, len(accounts))
+	for _, account := range accounts {
+		if seen[account.ID] || account.ID == testedAccount || !account.IsSchedulable() ||
+			!account.IsModelSupportedInGroup(&judge.GroupID, judge.ModelID) {
+			continue
+		}
+		seen[account.ID] = true
+		candidates = append(candidates, account)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Priority < candidates[j].Priority })
+	type route struct{ platform, accountType, baseURL string }
+	routes := make(map[route]int)
+	buckets := make([][]Account, 0)
+	for _, account := range candidates {
+		baseURL := account.GetBaseURL()
+		if account.Platform == PlatformOpenAI {
+			baseURL = account.GetOpenAIBaseURL()
+		}
+		key := route{account.Platform, account.Type, strings.TrimRight(baseURL, "/")}
+		bucket, ok := routes[key]
+		if !ok {
+			bucket = len(buckets)
+			routes[key] = bucket
+			buckets = append(buckets, nil)
+		}
+		buckets[bucket] = append(buckets[bucket], account)
+	}
+	ordered := make([]Account, 0, len(candidates))
+	for round := 0; len(ordered) < len(candidates); round++ {
+		for _, bucket := range buckets {
+			if round < len(bucket) {
+				ordered = append(ordered, bucket[round])
+			}
+		}
+	}
+	return ordered
 }
 
 func qualityJudgePrompt(cfg *PelicanTestConfig, answer string) string {

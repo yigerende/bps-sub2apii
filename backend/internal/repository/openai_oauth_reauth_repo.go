@@ -22,23 +22,40 @@ func NewOpenAIOAuthReauthRepository(db *sql.DB) service.OpenAIOAuthReauthReposit
 }
 
 func (r *openAIOAuthReauthRepository) UpsertConfig(ctx context.Context, config *service.OpenAIOAuthReauthStoredConfig) error {
-	_, err := r.db.ExecContext(ctx, `
+	result, err := r.db.ExecContext(ctx, `
 		INSERT INTO openai_oauth_reauth_configs (
-			account_id, login_email, credential_mode, proxy_source, proxy_id,
+			account_id, login_email, credential_mode, engine, proxy_source, proxy_id,
 			password_ciphertext, totp_secret_ciphertext, otp_url_ciphertext
 		)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''))
+		VALUES ($1, $2, $3, COALESCE(NULLIF($4, ''), 'local_worker'), $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''))
 		ON CONFLICT (account_id) DO UPDATE
 		SET login_email = EXCLUDED.login_email,
 			credential_mode = EXCLUDED.credential_mode,
+			engine = EXCLUDED.engine,
 			proxy_source = EXCLUDED.proxy_source,
 			proxy_id = EXCLUDED.proxy_id,
 			password_ciphertext = EXCLUDED.password_ciphertext,
 			totp_secret_ciphertext = EXCLUDED.totp_secret_ciphertext,
 			otp_url_ciphertext = EXCLUDED.otp_url_ciphertext,
 			updated_at = NOW()
-	`, config.AccountID, config.LoginEmail, config.CredentialMode, config.ProxySource, config.ProxyID,
-		config.PasswordCiphertext, config.TOTPSecretCiphertext, config.OTPURLCiphertext)
+        WHERE openai_oauth_reauth_configs.updated_at = $10
+	`, config.AccountID, config.LoginEmail, config.CredentialMode, config.Engine, config.ProxySource, config.ProxyID,
+		config.PasswordCiphertext, config.TOTPSecretCiphertext, config.OTPURLCiphertext, config.UpdatedAt)
+	if err != nil {
+		var p *pq.Error
+		if errors.As(err, &p) && p.Code == "55000" {
+			return infraerrors.Conflict("TOTP_ACCOUNT_BUSY", "Resolve the 2FA task before editing login credentials")
+		}
+	}
+	if err == nil {
+		n, countErr := result.RowsAffected()
+		if countErr != nil {
+			return countErr
+		}
+		if n == 0 {
+			return infraerrors.Conflict("OPENAI_REAUTH_CONFIG_CHANGED", "Login configuration changed; reload before saving")
+		}
+	}
 	return err
 }
 
@@ -47,12 +64,12 @@ func (r *openAIOAuthReauthRepository) GetConfig(ctx context.Context, accountID i
 	var proxyID sql.NullInt64
 	var passwordCiphertext, totpSecretCiphertext, otpURLCiphertext sql.NullString
 	err := r.db.QueryRowContext(ctx, `
-		SELECT account_id, login_email, credential_mode, proxy_source, proxy_id,
+		SELECT account_id, login_email, credential_mode, engine, proxy_source, proxy_id,
 			password_ciphertext, totp_secret_ciphertext, otp_url_ciphertext, updated_at
 		FROM openai_oauth_reauth_configs
 		WHERE account_id = $1
 	`, accountID).Scan(
-		&cfg.AccountID, &cfg.LoginEmail, &cfg.CredentialMode, &cfg.ProxySource, &proxyID,
+		&cfg.AccountID, &cfg.LoginEmail, &cfg.CredentialMode, &cfg.Engine, &cfg.ProxySource, &proxyID,
 		&passwordCiphertext, &totpSecretCiphertext, &otpURLCiphertext, &cfg.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -71,13 +88,24 @@ func (r *openAIOAuthReauthRepository) GetConfig(ctx context.Context, accountID i
 }
 
 func (r *openAIOAuthReauthRepository) CreateTask(ctx context.Context, accountID int64, expectedCredentialsHash string) (*service.OpenAIOAuthReauthTaskRecord, error) {
-	row := r.db.QueryRowContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Manual Codex tasks serialize with budget recovery and automatic insertion.
+	// An account need not be monitored to receive an explicitly requested task.
+	var monitoredID int64
+	if err := tx.QueryRowContext(ctx, `SELECT account_id FROM account_token_guard_v2_accounts WHERE account_id=$1 FOR UPDATE`, accountID).Scan(&monitoredID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	row := tx.QueryRowContext(ctx, `
 		INSERT INTO openai_oauth_reauth_tasks (account_id, status, stage, expected_credentials_hash)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, account_id, status, stage, COALESCE(worker_id, ''),
 			COALESCE(auth_session_id, ''), expected_credentials_hash,
 			COALESCE(error_message, ''), attempt,
-			created_at, updated_at, finished_at
+			created_at, updated_at, finished_at, oauth_profile
 	`, accountID, service.OpenAIOAuthReauthStatusQueued, service.OpenAIOAuthReauthStageQueued, expectedCredentialsHash)
 	record, err := scanOpenAIOAuthReauthTask(row)
 	if err != nil {
@@ -87,7 +115,7 @@ func (r *openAIOAuthReauthRepository) CreateTask(ctx context.Context, accountID 
 		}
 		return nil, err
 	}
-	return record, nil
+	return record, tx.Commit()
 }
 
 func (r *openAIOAuthReauthRepository) GetLatestTask(ctx context.Context, accountID int64) (*service.OpenAIOAuthReauthTaskRecord, error) {
@@ -95,9 +123,10 @@ func (r *openAIOAuthReauthRepository) GetLatestTask(ctx context.Context, account
 		SELECT id, account_id, status, stage, COALESCE(worker_id, ''),
 			COALESCE(auth_session_id, ''), expected_credentials_hash,
 			COALESCE(error_message, ''), attempt,
-			created_at, updated_at, finished_at
+			created_at, updated_at, finished_at, oauth_profile
 		FROM openai_oauth_reauth_tasks
 		WHERE account_id = $1
+        AND NOT EXISTS (SELECT 1 FROM openai_totp_rotations rotation WHERE rotation.task_id=openai_oauth_reauth_tasks.id)
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
 	`, accountID)
@@ -113,7 +142,7 @@ func (r *openAIOAuthReauthRepository) GetTask(ctx context.Context, taskID int64)
 		SELECT id, account_id, status, stage, COALESCE(worker_id, ''),
 			COALESCE(auth_session_id, ''), expected_credentials_hash,
 			COALESCE(error_message, ''), attempt,
-			created_at, updated_at, finished_at
+			created_at, updated_at, finished_at, oauth_profile
 		FROM openai_oauth_reauth_tasks
 		WHERE id = $1
 	`, taskID)
@@ -125,6 +154,22 @@ func (r *openAIOAuthReauthRepository) GetTask(ctx context.Context, taskID int64)
 }
 
 func (r *openAIOAuthReauthRepository) ClaimNextTask(ctx context.Context, workerID string, staleAfter time.Duration) (*service.OpenAIOAuthReauthTaskRecord, error) {
+	return r.claimNextTask(ctx, workerID, staleAfter, "")
+}
+
+func (r *openAIOAuthReauthRepository) ClaimNextPasswordTask(ctx context.Context, workerID string, staleAfter time.Duration) (*service.OpenAIOAuthReauthTaskRecord, error) {
+	return r.claimNextTask(ctx, workerID, staleAfter, service.OpenAIOAuthReauthModePasswordTOTP)
+}
+
+func (r *openAIOAuthReauthRepository) claimNextTask(ctx context.Context, workerID string, staleAfter time.Duration, mode string) (*service.OpenAIOAuthReauthTaskRecord, error) {
+	return r.ClaimNextTaskForEngines(ctx, workerID, staleAfter, mode, []string{service.OpenAIOAuthReauthEngineLocal})
+}
+
+func (r *openAIOAuthReauthRepository) ClaimNextTaskForEngines(ctx context.Context, workerID string, staleAfter time.Duration, mode string, engines []string) (*service.OpenAIOAuthReauthTaskRecord, error) {
+	return r.ClaimNextTaskForRuntime(ctx, workerID, staleAfter, mode, engines, "")
+}
+
+func (r *openAIOAuthReauthRepository) ClaimNextTaskForRuntime(ctx context.Context, workerID string, staleAfter time.Duration, mode string, engines []string, globalEngine string) (*service.OpenAIOAuthReauthTaskRecord, error) {
 	if staleAfter <= 0 {
 		staleAfter = 30 * time.Minute
 	}
@@ -138,15 +183,24 @@ func (r *openAIOAuthReauthRepository) ClaimNextTask(ctx context.Context, workerI
 				finished_at = NOW(),
 				updated_at = NOW()
 			WHERE status = $3
-				AND claimed_at < NOW() - ($4 * INTERVAL '1 second')
+                AND NOT EXISTS (SELECT 1 FROM openai_totp_rotations rotation WHERE rotation.task_id=openai_oauth_reauth_tasks.id)
+                AND claimed_at < NOW() - ($4 * INTERVAL '1 second')
 		), next_task AS (
 			SELECT id
 			FROM openai_oauth_reauth_tasks
-			WHERE status = $5
+			WHERE (status = $5
 				OR (
 					status = $6
 					AND claimed_at < NOW() - ($4 * INTERVAL '1 second')
-				)
+				))
+				AND ($9 = '' OR EXISTS (
+					SELECT 1 FROM openai_oauth_reauth_configs AS config
+					WHERE config.account_id = openai_oauth_reauth_tasks.account_id AND config.credential_mode = $9
+				))
+				AND CASE WHEN oauth_profile IN ('excel','siwc') THEN 'local_worker' ELSE COALESCE((SELECT CASE WHEN $11 <> '' THEN
+					CASE WHEN config.credential_mode = 'password_totp' THEN $11 ELSE 'local_worker' END
+					ELSE engine END FROM openai_oauth_reauth_configs AS config
+					WHERE config.account_id = openai_oauth_reauth_tasks.account_id), 'local_worker') END = ANY($10::text[])
 			ORDER BY created_at ASC, id ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -166,7 +220,7 @@ func (r *openAIOAuthReauthRepository) ClaimNextTask(ctx context.Context, workerI
 		RETURNING tasks.id, tasks.account_id, tasks.status, tasks.stage,
 			COALESCE(tasks.worker_id, ''), COALESCE(tasks.auth_session_id, ''),
 			tasks.expected_credentials_hash, COALESCE(tasks.error_message, ''), tasks.attempt,
-			tasks.created_at, tasks.updated_at, tasks.finished_at
+			tasks.created_at, tasks.updated_at, tasks.finished_at, tasks.oauth_profile
 	`,
 		service.OpenAIOAuthReauthStatusFailed,
 		service.OpenAIOAuthReauthStageFailed,
@@ -175,7 +229,7 @@ func (r *openAIOAuthReauthRepository) ClaimNextTask(ctx context.Context, workerI
 		service.OpenAIOAuthReauthStatusQueued,
 		service.OpenAIOAuthReauthStatusRunning,
 		service.OpenAIOAuthReauthStageStarting,
-		workerID,
+		workerID, mode, pq.Array(engines), globalEngine,
 	)
 	record, err := scanOpenAIOAuthReauthTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -216,7 +270,7 @@ func (r *openAIOAuthReauthRepository) BeginCallback(ctx context.Context, taskID 
 		RETURNING id, account_id, status, stage, COALESCE(worker_id, ''),
 			COALESCE(auth_session_id, ''), expected_credentials_hash,
 			COALESCE(error_message, ''), attempt,
-			created_at, updated_at, finished_at
+			created_at, updated_at, finished_at, oauth_profile
 	`, taskID, workerID, service.OpenAIOAuthReauthStatusCallbackProcessing,
 		service.OpenAIOAuthReauthStageExchangingToken, service.OpenAIOAuthReauthStatusRunning)
 	record, err := scanOpenAIOAuthReauthTask(row)
@@ -246,7 +300,7 @@ func (r *openAIOAuthReauthRepository) BeginDirectCallback(ctx context.Context, t
 		RETURNING id, account_id, status, stage, COALESCE(worker_id, ''),
 			COALESCE(auth_session_id, ''), expected_credentials_hash,
 			COALESCE(error_message, ''), attempt,
-			created_at, updated_at, finished_at
+			created_at, updated_at, finished_at, oauth_profile
 	`, taskID, workerID, service.OpenAIOAuthReauthStatusCallbackProcessing,
 		service.OpenAIOAuthReauthStageExchangingToken, service.OpenAIOAuthReauthStatusRunning)
 	record, err := scanOpenAIOAuthReauthTask(row)
@@ -306,7 +360,7 @@ func scanOpenAIOAuthReauthTask(row openAIOAuthReauthRow) (*service.OpenAIOAuthRe
 		&record.ID, &record.AccountID, &record.Status, &record.Stage,
 		&record.WorkerID, &record.AuthSessionID, &record.ExpectedCredentialsHash,
 		&record.Error, &record.Attempt,
-		&record.CreatedAt, &record.UpdatedAt, &finishedAt,
+		&record.CreatedAt, &record.UpdatedAt, &finishedAt, &record.OAuthProfile,
 	); err != nil {
 		return nil, err
 	}

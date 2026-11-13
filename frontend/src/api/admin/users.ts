@@ -4,7 +4,8 @@
  */
 
 import { apiClient } from '../client'
-import type { AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
+import { listPlatformIds } from '@/constants/platformCatalog'
+import type { AccountPlatform, AdminUser, UpdateUserRequest, PaginatedResponse, ApiKey } from '@/types'
 
 export interface AdminBindAuthIdentityChannelRequest {
   channel: string
@@ -254,7 +255,18 @@ export async function getUserUsageStats(
 /**
  * Balance history item returned from the API
  */
+export interface AutoCreditBalanceHistory {
+  ledger_id: number
+  amount: string
+  balance_before: string
+  balance_after: string
+  status: 'pending' | 'settled'
+  settled_at: string | null
+  settled_by: number | null
+}
+
 export interface BalanceHistoryItem {
+  auto_credit?: AutoCreditBalanceHistory
   id: number
   code: string
   type: string
@@ -331,12 +343,11 @@ export async function bindUserAuthIdentity(
 /**
  * Platform quota types
  */
-// Keep aligned with backend/internal/service/domain_constants.go AllowedQuotaPlatforms.
-export const PLATFORM_QUOTA_PLATFORMS = [
-  'anthropic', 'openai', 'gemini', 'antigravity', 'grok',
-  'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go',
-] as const
-export type PlatformQuotaPlatform = typeof PLATFORM_QUOTA_PLATFORMS[number]
+// 与后端 AllowedQuotaPlatforms 同源：平台清单中的全部具体平台。
+export function platformQuotaPlatforms(): PlatformQuotaPlatform[] {
+  return listPlatformIds()
+}
+export type PlatformQuotaPlatform = AccountPlatform
 export type PlatformQuotaWindow = 'daily' | 'weekly' | 'monthly'
 
 export interface PlatformQuotaItem {

@@ -1,3 +1,4 @@
+import { settingsLocation } from '@/utils/settingsSearch'
 /**
  * Vue Router configuration for Sub2API frontend
  * Defines all application routes with lazy loading and navigation guards
@@ -253,6 +254,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/lottery',
+    name: 'Lottery',
+    component: () => import('@/views/user/LotteryView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: false, title: 'Recharge Draws', titleKey: 'lottery.title' }
+  },
+  {
+    path: '/admin/lottery',
+    name: 'AdminLottery',
+    component: () => import('@/views/admin/LotteryView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'Prize Draw Management', titleKey: 'lottery.adminTitle' }
+  },
+  {
     path: '/affiliate',
     name: 'Affiliate',
     component: () => import('@/views/user/AffiliateView.vue'),
@@ -262,6 +275,31 @@ const routes: RouteRecordRaw[] = [
       title: 'Affiliate',
       titleKey: 'affiliate.title',
       descriptionKey: 'affiliate.description'
+    }
+  },
+  {
+    path: '/support-tickets',
+    name: 'SupportTickets',
+    component: () => import('@/views/user/SupportTicketsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title',
+      descriptionKey: 'supportTickets.description'
+    }
+  },
+  {
+    path: '/support-tickets/:id(\\d+)',
+    name: 'SupportTicketDetail',
+    component: () => import('@/views/user/SupportTicketDetailView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title'
     }
   },
   {
@@ -347,6 +385,18 @@ const routes: RouteRecordRaw[] = [
       requiresAdmin: false,
       title: 'Payment Result',
       titleKey: 'payment.result.success',
+      requiresPayment: false
+    }
+  },
+  {
+    path: '/payment/crypto/:outTradeNo',
+    name: 'CryptoPayment',
+    component: () => import('@/views/user/CryptoPaymentView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'Crypto Payment',
+      titleKey: 'payment.cryptoCheckout.title',
       requiresPayment: false
     }
   },
@@ -533,7 +583,13 @@ const routes: RouteRecordRaw[] = [
   },
   { path: '/admin/priority-scheduling', name: 'AdminPriorityScheduling', component: () => import('@/views/admin/PrioritySchedulingView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Priority scheduling', titleKey: 'priorityScheduling.title' } },
   { path: '/admin/auto-config', name: 'AdminAutoConfig', component: () => import('@/views/admin/AutoConfigView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Auto Configuration', titleKey: 'autoConfig.title' } },
+  { path: '/admin/group-cache-tests', name: 'AdminGroupCacheTests', component: () => import('@/views/admin/GroupCacheTestView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Group cache test', titleKey: 'admin.groupCacheTest.title', descriptionKey: 'admin.groupCacheTest.description' } },
+  { path: '/admin/channel-operations', name: 'AdminChannelOperations', component: () => import('@/views/admin/UpstreamChannelOperationsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, titleKey: 'channelOps.title', descriptionKey: 'channelOps.description' } },
+  { path: '/admin/upstream-channels', name: 'AdminUpstreamChannels', component: () => import('@/views/admin/UpstreamChannelsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, titleKey: 'upstreamEntities.title', descriptionKey: 'upstreamEntities.history' } },
+  { path: '/admin/profit-operations', name: 'AdminProfitOperations', component: () => import('@/views/admin/ProfitOperationsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, titleKey: 'profitOps.title', descriptionKey: 'profitOps.description' } },
   { path: '/admin/smart-ops', redirect: '/admin/account-quality', meta: { requiresAuth: true, requiresAdmin: true } },
+  { path: '/admin/ai-ops', name: 'AdminAIOps', component: () => import('@/views/admin/AIOpsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'AI operations', titleKey: 'aiOps.title', descriptionKey: 'aiOps.description' } },
+  { path: '/admin/controlled-experiments', name: 'AdminControlledExperiments', component: () => import('@/views/admin/ControlledExperimentsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Controlled experiments', titleKey: 'controlledExperiments.title', descriptionKey: 'controlledExperiments.description' } },
   { path: '/admin/token-guard', name: 'AdminTokenGuard', component: () => import('@/views/admin/ops/TokenGuardView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Credential Guard', titleKey: 'tokenGuard.title', descriptionKey: 'tokenGuard.description' } },
   { path: '/admin/pelican-tests', name: 'AdminPelicanTests', component: () => import('@/views/admin/PelicanTestsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Pelican Showcase', titleKey: 'pelicanTests.title', descriptionKey: 'pelicanTests.description' } },
   { path: '/admin/token-guard-v2', name: 'AdminTokenGuardV2', component: () => import('@/views/admin/ops/TokenGuardV2View.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Credential Operations', titleKey: 'tokenGuardV2.title', descriptionKey: 'tokenGuardV2.description' } },
@@ -556,6 +612,7 @@ const routes: RouteRecordRaw[] = [
       descriptionKey: 'admin.accounts.description'
     }
   },
+  { path: '/admin/astra-gateway', redirect: '/admin/harvest-flow' },
   {
     path: '/admin/harvest-flow',
     name: 'AdminHarvestFlow',
@@ -590,6 +647,31 @@ const routes: RouteRecordRaw[] = [
       title: 'Announcements',
       titleKey: 'admin.announcements.title',
       descriptionKey: 'admin.announcements.description'
+    }
+  },
+  {
+    path: '/admin/support-tickets',
+    name: 'AdminSupportTickets',
+    component: () => import('@/views/admin/SupportTicketsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title',
+      descriptionKey: 'supportTickets.adminDescription'
+    }
+  },
+  {
+    path: '/admin/support-tickets/:id(\\d+)',
+    name: 'AdminSupportTicketDetail',
+    component: () => import('@/views/admin/SupportTicketDetailView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title'
     }
   },
   {
@@ -654,6 +736,17 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/security-records', name: 'SecurityRecords',
+    component: () => import('@/features/security-penalties/SecurityRecordsView.vue'),
+    meta: { requiresAuth: true, title: 'Security records', titleKey: 'securityRecords.title' }
+  },
+  {
+    path: '/admin/ip-audit',
+    name: 'AdminIPAudit',
+    component: () => import('@/features/ip-audit/IPAuditView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, titleKey: 'ipAudit.title' }
+  },
+  {
     path: '/admin/prompt-audit',
     name: 'AdminPromptAudit',
     component: () => import('@/features/prompt-audit/PromptAuditView.vue'),
@@ -663,6 +756,19 @@ const routes: RouteRecordRaw[] = [
       title: 'Prompt Audit',
       titleKey: 'admin.promptAudit.title',
       descriptionKey: 'admin.promptAudit.description',
+      requiresRiskControl: true
+    }
+  },
+  {
+    path: '/admin/safety-prompt-audit',
+    name: 'AdminSafetyPromptAudit',
+    component: () => import('@/views/admin/SafetyPromptAuditView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Safety Injection Audit',
+      titleKey: 'admin.safetyPromptAudit.title',
+      descriptionKey: 'admin.safetyPromptAudit.description',
       requiresRiskControl: true
     }
   },
@@ -775,7 +881,9 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
-  scrollBehavior(_to, _from, savedPosition) {
+  scrollBehavior(to, _from, savedPosition) {
+    // SettingsView waits for its async form and reveals the target tab first.
+    if (to.path === '/admin/settings' && settingsLocation(to.query.tab, to.hash).linked) return false
     // Scroll to saved position when using browser back/forward
     if (savedPosition) {
       return savedPosition
@@ -832,6 +940,22 @@ router.beforeEach(async (to, _from, next) => {
   if (!authInitialized) {
     authStore.checkAuth()
     authInitialized = true
+  }
+
+  // Old IP tabs are now a separate page. Normalize before auth/feature checks
+  // so refresh, same-route query navigation and login return URLs agree.
+  if (to.path === '/admin/prompt-audit' && to.query.tab === 'ip') {
+    const query = { ...to.query }
+    delete query.tab
+    next({ path: '/admin/ip-audit', query, hash: to.hash, replace: true })
+    return
+  }
+
+  // The former settings form now lives on IP Audit. Match the exact anchor
+  // so unrelated Security settings and their deep links stay on Settings.
+  if (to.path === '/admin/settings' && to.hash === '#ip-risk-settings') {
+    next({ path: '/admin/ip-audit', query: { ...to.query, tab: 'config' }, hash: to.hash, replace: true })
+    return
   }
 
   // Set page title
@@ -965,7 +1089,7 @@ router.beforeEach(async (to, _from, next) => {
   // 公共设置可能尚未加载（App.vue 的 onMounted 异步拉取晚于首次导航，且纯静态部署
   // 无 __APP_CONFIG__ 注入）。此时 cachedPublicSettings 为空会把 payment/risk_control
   // 误判为“未启用”而错误拦截，故这里先确保设置加载完成。
-  if ((to.meta.requiresPayment || to.meta.requiresRiskControl || to.meta.requiresSubscription) && !appStore.publicSettingsLoaded) {
+  if ((to.meta.requiresPayment || to.meta.requiresRiskControl || to.meta.requiresSubscription || to.meta.requiresSupportTickets) && !appStore.publicSettingsLoaded) {
     try {
       await appStore.fetchPublicSettings()
     } catch (error) {
@@ -988,6 +1112,16 @@ router.beforeEach(async (to, _from, next) => {
     to.meta.requiresRiskControl &&
     appStore.publicSettingsLoaded &&
     appStore.cachedPublicSettings?.risk_control_enabled === false
+  ) {
+    next(authStore.isAdmin ? '/admin/settings' : '/dashboard')
+    return
+  }
+
+  // 网站工单是 opt-in 开关：设置加载成功且未开启时拦截直达。
+  if (
+    to.meta.requiresSupportTickets &&
+    appStore.publicSettingsLoaded &&
+    appStore.cachedPublicSettings?.support_ticket_enabled !== true
   ) {
     next(authStore.isAdmin ? '/admin/settings' : '/dashboard')
     return

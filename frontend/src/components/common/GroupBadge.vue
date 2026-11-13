@@ -8,7 +8,7 @@
     <!-- Platform logo -->
     <PlatformIcon v-if="platform" :platform="platform" size="sm" />
     <!-- Group name -->
-    <span class="truncate">{{ name }}</span>
+    <span :class="truncate ? 'truncate' : 'min-w-0 whitespace-normal [overflow-wrap:anywhere]'">{{ name }}</span>
     <!-- Right side label -->
     <span v-if="showLabel" :class="labelClass">
       <template v-if="hasCustomRate">
@@ -45,6 +45,8 @@ interface Props {
   peakEnd?: string
   peakRateMultiplier?: number
   showRate?: boolean
+  /** Allow full group names to wrap in layouts that have room for multiple lines. */
+  truncate?: boolean
   daysRemaining?: number | null // 剩余天数（订阅类型时使用）
   /**
    * 订阅分组默认在右侧 label 展示"订阅"或剩余天数；
@@ -57,6 +59,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   subscriptionType: 'standard',
   showRate: true,
+  truncate: true,
   daysRemaining: null,
   userRateMultiplier: null,
   peakRateEnabled: false,
@@ -147,7 +150,7 @@ const labelClass = computed(() => {
   }
 
   // 正常状态或无天数：根据平台显示主题色
-  if (props.platform === 'anthropic') {
+  if (props.platform === 'anthropic' || props.platform === 'mistral') {
     return `${base} bg-orange-200/60 text-orange-800 dark:bg-orange-800/40 dark:text-orange-300`
   }
   if (props.platform === 'openai') {
@@ -186,6 +189,11 @@ const peakRateClass = computed(() => {
 
 // Badge color based on platform and subscription type
 const badgeClass = computed(() => {
+  if (props.platform === 'mistral') {
+    return isSubscription.value
+      ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+      : 'bg-orange-50 text-orange-700 dark:bg-orange-900/20 dark:text-orange-400'
+  }
   if (props.platform === 'anthropic') {
     // Claude: orange theme
     return isSubscription.value

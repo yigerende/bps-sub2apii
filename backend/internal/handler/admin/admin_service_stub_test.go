@@ -734,6 +734,10 @@ func (s *stubAdminService) CheckMihomoNodeQuality(ctx context.Context, kernel se
 	return &service.ProxyQualityCheckResult{Score: 100, Grade: "A", CheckedAt: time.Now().Unix()}, nil
 }
 
+func (s *stubAdminService) CreateMihomoNodeProxies(ctx context.Context, kernel service.MihomoStaticNodeBinder, names []string) (*service.MihomoNodeProxyImportResult, error) {
+	return &service.MihomoNodeProxyImportResult{}, nil
+}
+
 func (s *stubAdminService) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search string, sortBy, sortOrder string) ([]service.RedeemCode, int64, error) {
 	s.lastListRedeemCodes.codeType = codeType
 	s.lastListRedeemCodes.status = status
@@ -806,6 +810,33 @@ func (s *stubAdminService) AdminResetAPIKeyRateLimitUsage(ctx context.Context, k
 		}
 	}
 	return nil, service.ErrAPIKeyNotFound
+}
+
+func (s *stubAdminService) AdminUpdateAPIKeySettings(ctx context.Context, keyID int64, input service.AdminUpdateAPIKeySettingsInput) (*service.AdminUpdateAPIKeyGroupIDResult, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+	result, err := s.AdminUpdateAPIKeyGroupID(ctx, keyID, input.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	if input.ModelMapping != nil {
+		result.APIKey.ModelMapping = *input.ModelMapping
+	}
+	if input.ReasoningEffort != nil {
+		result.APIKey.ReasoningEffort = *input.ReasoningEffort
+	}
+	if input.ContextTokenLimit != nil {
+		result.APIKey.ContextTokenLimit = *input.ContextTokenLimit
+	}
+	if input.AllowLongContext != nil {
+		result.APIKey.AllowLongContext = *input.AllowLongContext
+	}
+	if input.ResetRateLimitUsage {
+		result.APIKey.Usage5h, result.APIKey.Usage1d, result.APIKey.Usage7d = 0, 0, 0
+		result.APIKey.Window5hStart, result.APIKey.Window1dStart, result.APIKey.Window7dStart = nil, nil, nil
+	}
+	return result, nil
 }
 
 func (s *stubAdminService) ResetAccountQuota(ctx context.Context, id int64) error {

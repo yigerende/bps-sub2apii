@@ -1,32 +1,43 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { useAuthStore } from './auth'
-import { listQualityPlans, listQualityOperations, type QualityOperation } from '@/api/admin/accountQuality'
+import { listQualityPlans, listQualityOperations, listQualityTemplates, listQualityPresets, type QualityOperation, type QualityRuleTemplate, type QualityRulePreset } from '@/api/admin/accountQuality'
 import { getAllIncludingInactive } from '@/api/admin/groups'
 import type { AdminGroup, ScheduledTestPlan } from '@/types'
 
 // Session-only summaries survive route navigation. Answer bodies stay in the detail drawer.
 export const useAccountQualityStore = defineStore('accountQuality', () => {
   const auth = useAuthStore()
-  const plans = ref<ScheduledTestPlan[]>([]), groups = ref<AdminGroup[]>([])
+  const plans = ref<ScheduledTestPlan[]>([]), groups = ref<AdminGroup[]>([]), templates = ref<QualityRuleTemplate[]>([])
+  const presets = ref<QualityRulePreset[]>([]), presetsLoading = ref(false), presetsError = ref('')
   const operations = ref<QualityOperation[]>([]), cursor = ref(0)
   const rulesLoaded = ref(false), operationsLoaded = ref(false)
   const rulesLoading = ref(false), operationsLoading = ref(false), moreLoading = ref(false)
   const rulesError = ref(''), operationsError = ref(''), groupsError = ref('')
   const updatedAt = ref(0)
   const search = ref(''), selectedPlanId = ref<number | null>(null), operationFilter = ref('all')
-  let ruleVersion = 0, operationVersion = 0, groupVersion = 0
+  let ruleVersion = 0, operationVersion = 0, groupVersion = 0, presetVersion = 0
   let rulesFlight: Promise<void> | null = null, groupsFlight: Promise<void> | null = null
   const errorText = (e: unknown) => e instanceof Error ? e.message : 'qualityOps.error'
 
   function reset() {
-    ruleVersion++; operationVersion++; groupVersion++
-    plans.value = []; groups.value = []; operations.value = []; cursor.value = 0
+    ruleVersion++; operationVersion++; groupVersion++; presetVersion++
+    presets.value = []; presetsLoading.value = false; presetsError.value = ''
+    plans.value = []; groups.value = []; templates.value = []; operations.value = []; cursor.value = 0
     rulesLoaded.value = operationsLoaded.value = false
     rulesLoading.value = operationsLoading.value = moreLoading.value = false
     rulesError.value = operationsError.value = groupsError.value = ''
     search.value = ''; selectedPlanId.value = null; operationFilter.value = 'all'; updatedAt.value = 0
     rulesFlight = groupsFlight = null
+  }
+  async function refreshPresets() {
+    const version = ++presetVersion
+    presetsLoading.value = true; presetsError.value = ''
+    try {
+      const data = await listQualityPresets()
+      if (version === presetVersion) presets.value = data
+    } catch (e) { if (version === presetVersion) presetsError.value = errorText(e) }
+    finally { if (version === presetVersion) presetsLoading.value = false }
   }
   watch(() => auth.user ? `${auth.user.id}:${auth.user.role}` : '', reset, { flush: 'sync' })
 
@@ -36,9 +47,10 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
     rulesLoading.value = true; rulesError.value = ''
     const flight = (async () => {
       try {
-        const data = await listQualityPlans()
+        // 分组规则和它建出的账号规则一起刷新，卡片上的覆盖数和规则列表不会对不上。
+        const [data, groupRules] = await Promise.all([listQualityPlans(), listQualityTemplates()])
         if (version !== ruleVersion) return
-        plans.value = data; rulesLoaded.value = true
+        plans.value = data; templates.value = groupRules; rulesLoaded.value = true
         if (selectedPlanId.value && !data.some(p => p.id === selectedPlanId.value)) selectedPlanId.value = null
         updatedAt.value = Date.now()
       } catch (e) { if (version === ruleVersion) rulesError.value = errorText(e) }
@@ -76,9 +88,10 @@ export const useAccountQualityStore = defineStore('accountQuality', () => {
     finally { if (version === operationVersion) operationsLoading.value = moreLoading.value = false }
   }
   async function refresh() {
-    await Promise.all([refreshRules(), refreshGroups(), refreshOperations()])
+    await Promise.all([refreshRules(), refreshGroups(), refreshOperations(), refreshPresets()])
   }
-  return { plans, groups, operations, cursor, rulesLoaded, operationsLoaded, rulesLoading, operationsLoading, moreLoading,
+  return { plans, groups, templates, operations, cursor, rulesLoaded, operationsLoaded, rulesLoading, operationsLoading, moreLoading,
     rulesError, operationsError, groupsError, updatedAt, search, selectedPlanId, operationFilter,
+    presets, presetsLoading, presetsError, refreshPresets,
     refresh, refreshRules, refreshGroups, refreshOperations, reset }
 })

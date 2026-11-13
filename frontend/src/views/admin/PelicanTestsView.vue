@@ -39,6 +39,16 @@
                 <span><strong>{{ t('pelicanTests.showcase.enabled') }}</strong><small>{{ t('pelicanTests.showcase.enabledHint') }}</small></span>
                 <Toggle v-model="draft.enabled" data-testid="pelican-showcase-enabled" />
               </div>
+              <div class="enable-row mt-5">
+                <span><strong>{{ t('pelicanTests.showcase.apiEnabled') }}</strong><small>{{ t('pelicanTests.showcase.apiEnabledHint') }}</small></span>
+                <Toggle v-model="draft.api_enabled" :aria-label="t('pelicanTests.showcase.apiEnabled')" data-testid="pelican-showcase-api-enabled" />
+              </div>
+              <p v-if="!draft.enabled" class="field-hint text-amber-600 dark:text-amber-400" data-testid="pelican-showcase-api-requires-gallery">
+                {{ t('pelicanTests.showcase.apiRequiresGallery') }}
+              </p>
+              <button type="button" class="mt-2 inline-flex items-center gap-1.5 text-xs text-primary-600 hover:underline dark:text-primary-400" data-testid="pelican-showcase-api-info" @click="showApiInfo = true">
+                <Icon name="link" size="xs" />{{ t('pelicanTests.showcase.apiInfo') }}
+              </button>
               <label class="field-label" for="pelican-showcase-max-items">{{ t('pelicanTests.showcase.maxItems') }}</label>
               <div class="relative">
                 <input id="pelican-showcase-max-items" v-model.number="draft.max_items" type="number" min="1" max="100" required class="input w-full pr-12" data-testid="pelican-showcase-max-items" />
@@ -88,6 +98,11 @@
                 <div class="min-w-0">
                   <p class="plan-title">
                     <strong :title="plan.group_name">{{ plan.group_name }}</strong>
+                    <span class="inline-flex flex-wrap items-center gap-x-2 text-xs font-normal tabular-nums text-gray-500 dark:text-gray-400" :title="t('pelicanTests.cost.hint')" :data-testid="`pelican-plan-cost-${plan.id}`">
+                      <span class="whitespace-nowrap">{{ t('pelicanTests.cost.today', { amount: costLabel(plan.today_cost_usd, plan.today_cost_incomplete) }) }}</span>
+                      <span aria-hidden="true">·</span>
+                      <span class="whitespace-nowrap">{{ t('pelicanTests.cost.total', { amount: costLabel(plan.total_cost_usd, plan.total_cost_incomplete) }) }}</span>
+                    </span>
                     <span class="state-chip" :class="plan.enabled ? 'state-on' : 'state-off'">{{ t(plan.enabled ? 'pelicanTests.plans.active' : 'pelicanTests.plans.paused') }}</span>
                     <span v-if="isRunning(plan)" class="state-chip state-running">{{ t('pelicanTests.plans.running') }}</span>
                   </p>
@@ -151,12 +166,13 @@
                 <th>{{ t('pelicanTests.history.account') }}</th>
                 <th>{{ t('pelicanTests.history.result') }}</th>
                 <th>{{ t('pelicanTests.history.duration') }}</th>
+                <th>{{ t('pelicanTests.cost.column') }}</th>
                 <th />
               </tr>
             </thead>
             <tbody>
               <tr v-if="resultsLoading && !results.length">
-                <td colspan="7" class="text-center" role="status">{{ t('pelicanTests.history.loading') }}</td>
+                <td colspan="8" class="text-center" role="status">{{ t('pelicanTests.history.loading') }}</td>
               </tr>
               <tr v-for="result in results" :key="result.id" :data-testid="`pelican-result-${result.id}`">
                 <td class="whitespace-nowrap">{{ formatDateTimeToMinute(result.started_at) }}</td>
@@ -176,7 +192,8 @@
                   <small v-if="result.status !== 'success'" class="error-text" :title="result.error_message">{{ result.error_message }}</small>
                 </td>
                 <td class="whitespace-nowrap tabular-nums">{{ pelicanDurationLabel(t, result.latency_ms) }}</td>
-                <td class="text-right">
+                <td class="whitespace-nowrap tabular-nums" :title="t('pelicanTests.cost.hint')" :data-testid="`pelican-result-cost-${result.id}`">{{ costLabel(result.cost_usd, result.cost_incomplete) }}</td>
+                <td class="whitespace-nowrap text-right">
                   <button v-if="result.status === 'success'" class="link-button" :data-testid="`pelican-result-view-${result.id}`" @click="openPreview(result)">
                     {{ t('pelicanTests.history.view') }}
                   </button>
@@ -231,7 +248,8 @@
             <label class="field-label mt-0" for="pelican-test-prompt">{{ t('pelicanTests.editor.prompt') }}</label>
             <button type="button" class="link-button text-xs" @click="editor.form.prompt = PELICAN_PROMPT">{{ t('pelicanTests.editor.resetPrompt') }}</button>
           </div>
-          <textarea id="pelican-test-prompt" v-model="editor.form.prompt" rows="3" maxlength="32000" class="input w-full" data-testid="pelican-test-prompt" />
+          <PelicanPromptMode v-model="editor.form.prompt_mode" />
+          <textarea v-if="editor.form.prompt_mode !== 'random'" id="pelican-test-prompt" v-model="editor.form.prompt" rows="3" maxlength="32000" class="input w-full" data-testid="pelican-test-prompt" />
           <p class="field-hint">{{ t('pelicanTests.editor.promptHint') }}</p>
         </div>
         <div class="grid gap-4 sm:grid-cols-2">
@@ -279,6 +297,7 @@
       @close="preview = null"
     >
       <div v-if="preview" class="flex min-h-0 flex-1 flex-col gap-3" data-testid="pelican-result-preview">
+        <PelicanQuestionSnapshot :question="preview.result.pelican_config?.pelican_question" :actual-prompt="preview.result.pelican_config?.actual_prompt || preview.result.pelican_config?.prompt" />
         <div class="min-h-0 flex-1 overflow-hidden rounded-xl border border-gray-200 bg-gray-100 dark:border-dark-700 dark:bg-dark-900">
           <PelicanArtworkPreview v-if="preview.status === 'ready'" :html="preview.html" :title="previewTitle" />
           <div v-else class="flex h-full items-center justify-center p-6 text-sm text-gray-500">
@@ -296,6 +315,12 @@
       </template>
     </BaseDialog>
 
+    <PelicanShowcaseApiDialog
+      :show="showApiInfo"
+      :enabled="!!settings?.enabled && settings?.api_enabled === true"
+      @close="showApiInfo = false"
+    />
+
     <ConfirmDialog
       :show="deleting !== null"
       :title="t('pelicanTests.plans.deleteTitle')"
@@ -309,6 +334,8 @@
 </template>
 
 <script setup lang="ts">
+import PelicanPromptMode from '@/components/admin/account/PelicanPromptMode.vue'
+import PelicanQuestionSnapshot from '@/components/admin/account/PelicanQuestionSnapshot.vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -322,6 +349,7 @@ import Select from '@/components/common/Select.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import PelicanArtworkPreview from '@/components/user/pelican/PelicanArtworkPreview.vue'
+import PelicanShowcaseApiDialog from '@/components/user/pelican/PelicanShowcaseApiDialog.vue'
 import { pelicanDurationLabel } from '@/components/user/pelican/pelicanShowcaseFormat'
 import { adminAPI } from '@/api'
 import {
@@ -369,6 +397,7 @@ const groups = ref<AdminGroup[]>([])
 const groupsLoadFailed = ref(false)
 const loading = ref(false)
 const savingSettings = ref(false)
+const showApiInfo = ref(false)
 const savingPlan = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -417,6 +446,12 @@ function scheduleLabel(cron: string) {
 
 function accountName(result: PelicanGroupTestResult) {
   return result.account_name || `#${result.account_id}`
+}
+
+function costLabel(value: number | null | undefined, incomplete = false) {
+  if (value == null) return t('pelicanTests.cost.unknown')
+  const amount = value > 0 && value < 0.000001 ? '<$0.000001' : `$${value.toFixed(6)}`
+  return incomplete ? t('pelicanTests.cost.partial', { amount }) : amount
 }
 
 function attemptLabel(attempt: PelicanGroupTestAttempt) {
@@ -554,6 +589,7 @@ function inputFrom(plan: PelicanGroupTestPlan): PelicanGroupTestPlanInput {
     cron_expression: plan.cron_expression,
     enabled: plan.enabled,
     prompt: plan.pelican_config?.prompt || PELICAN_PROMPT,
+    prompt_mode: plan.pelican_config?.prompt_mode || 'custom',
     reasoning_effort: plan.pelican_config?.reasoning_effort || 'medium',
     parallel_count: plan.pelican_config?.parallel_count || 1,
   }
@@ -572,7 +608,7 @@ async function savePlan() {
   const current = editor.value
   if (!current || savingPlan.value) return
   const form = current.form
-  if (!form.group_id || !form.model_id.trim() || !form.prompt.trim() || !form.cron_expression.trim()) {
+  if (!form.group_id || !form.model_id.trim() || (form.prompt_mode !== 'random' && !form.prompt.trim()) || !form.cron_expression.trim()) {
     fail(null, t('pelicanTests.editor.required'))
     return
   }
@@ -650,7 +686,7 @@ async function openPreview(result: PelicanGroupTestResult) {
     const full = await pelicanTestsAPI.getResult(result.id)
     if (preview.value?.result.id !== result.id) return
     const html = extractPelicanHtml(full.response_text || '')
-    preview.value = { result, html, status: html ? 'ready' : 'invalid' }
+    preview.value = { result: full, html, status: html ? 'ready' : 'invalid' }
   } catch {
     if (preview.value?.result.id === result.id) preview.value = { result, html: '', status: 'error' }
   }
@@ -668,7 +704,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.pelican-tests { max-width: 1660px; margin: auto; @apply text-gray-900 dark:text-gray-100; }
+.pelican-tests { @apply w-full min-w-0 text-gray-900 dark:text-gray-100; }
 .ops-heading { @apply mb-6 flex flex-wrap items-center justify-between gap-4; }
 .eyebrow { @apply mb-1 text-[11px] font-semibold tracking-widest text-primary-600; }
 .ops-heading h2 { @apply text-2xl font-semibold tracking-tight; }
@@ -693,7 +729,7 @@ onBeforeUnmount(() => {
 .panel-heading .count { @apply ml-2 rounded-md bg-gray-100 px-2 py-0.5 text-xs font-normal tabular-nums text-gray-500 dark:bg-dark-800; }
 .plan-list { @apply divide-y divide-gray-100 dark:divide-dark-800; }
 .plan-row { @apply flex flex-wrap items-start justify-between gap-4 px-5 py-4; }
-.plan-main { @apply flex min-w-0 flex-1 items-start gap-3; }
+.plan-main { @apply flex min-w-0 items-start gap-3; flex: 1 1 20rem; }
 .group-icon { @apply grid h-9 w-9 shrink-0 place-items-center rounded-xl ring-1 ring-black/5 dark:ring-white/10; }
 .plan-title { @apply flex flex-wrap items-center gap-2; }
 .plan-title strong { @apply truncate text-sm font-semibold; max-width: 260px; }
@@ -710,7 +746,7 @@ onBeforeUnmount(() => {
 .result-dot { @apply inline-block h-2 w-2 rounded-full; }
 .dot-ok { @apply bg-emerald-500; }
 .dot-bad { @apply bg-red-500; }
-.plan-actions { @apply flex shrink-0 flex-wrap items-center gap-1; }
+.plan-actions { @apply ml-auto flex shrink-0 flex-wrap items-center gap-1; }
 .plan-actions button { @apply inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-dark-800; }
 .plan-actions button.danger { @apply text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30; }
 .history-scroll { @apply overflow-x-auto; }

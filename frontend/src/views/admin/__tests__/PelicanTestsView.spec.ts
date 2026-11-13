@@ -1,3 +1,6 @@
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach as setupPiniaBeforeEach } from 'vitest'
+setupPiniaBeforeEach(() => setActivePinia(createPinia()))
 import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import PelicanTestsView from '../PelicanTestsView.vue'
@@ -28,17 +31,19 @@ const result = (overrides: Partial<PelicanGroupTestResult> = {}): PelicanGroupTe
   id: 90, plan_id: 7, group_id: 4, group_name: 'GPT PRO号池', account_id: 12, account_name: 'pool-b',
   attempts: [{ account_id: 11, account_name: 'pool-a', error: 'API returned 429' }],
   status: 'success', error_message: '', latency_ms: 106600, pelican_config: { prompt: '', reasoning_effort: 'high', parallel_count: 1, model_id: 'gpt-6-astra' },
+  cost_usd: 0.012345, cost_incomplete: false,
   started_at: '2026-09-28T04:00:00Z', finished_at: '2026-09-28T04:02:00Z', created_at: '2026-09-28T04:02:00Z',
   ...overrides,
 })
 const plan = (overrides: Partial<PelicanGroupTestPlan> = {}): PelicanGroupTestPlan => ({
   id: 7, group_id: 4, group_name: 'GPT PRO号池', group_platform: 'openai', group_status: 'active',
   model_id: 'gpt-6-astra', cron_expression: '*/30 * * * *', enabled: true,
+  today_cost_usd: 0.123456, total_cost_usd: 12.345678, today_cost_incomplete: false, total_cost_incomplete: false,
   pelican_config: { question_kind: 'pelican', prompt: 'draw a pelican', reasoning_effort: 'high', parallel_count: 2 },
   last_run_at: '2026-09-28T04:00:00Z', next_run_at: '2026-09-28T04:30:00Z', last_result: result(), created_at: '', updated_at: '',
   ...overrides,
 })
-const settings = { enabled: false, max_items: 20, auto_cleanup: true, retention_days: 7 }
+const settings = { enabled: false, api_enabled: true, max_items: 20, auto_cleanup: true, retention_days: 7 }
 
 const SelectStub = {
   props: ['modelValue', 'options', 'disabled'],
@@ -63,6 +68,10 @@ const mountView = () => mount(PelicanTestsView, {
       Select: SelectStub,
       Toggle: ToggleStub,
       BaseDialog: { props: ['show', 'title'], template: '<div v-if="show" class="dialog"><h3>{{ title }}</h3><slot /><slot name="footer" /></div>' },
+      PelicanShowcaseApiDialog: {
+        props: ['show', 'enabled'],
+        template: '<div v-if="show" data-testid="api-info-dialog" :data-enabled="enabled" />',
+      },
       ConfirmDialog: {
         props: ['show'], emits: ['confirm', 'cancel'],
         template: `<div v-if="show" class="confirm"><button class="confirm-yes" @click="$emit('confirm')" /></div>`,
@@ -91,6 +100,23 @@ afterEach(() => {
 })
 
 describe('PelicanTestsView', () => {
+  it('shows USD totals beside group names and preserves unknown, zero and partial costs', async () => {
+    api.listPlans.mockResolvedValue([plan(), plan({ id: 8, today_cost_usd: 0, total_cost_usd: 0.4, total_cost_incomplete: true })])
+    api.listResults.mockResolvedValue({ items: [result(), result({ id: 89, cost_usd: null }), result({ id: 88, cost_usd: 0 }), result({ id: 87, cost_usd: 0.0000001 }), result({ id: 86, cost_usd: 0.2, cost_incomplete: true })], total: 5 })
+    wrapper = mountView()
+    await flushPromises()
+    const summary = wrapper.get('[data-testid="pelican-plan-cost-7"]')
+    expect(summary.text()).toContain('$0.123456')
+    expect(summary.text()).toContain('$12.345678')
+    expect(summary.element.parentElement?.classList.contains('plan-title')).toBe(true)
+    expect(wrapper.get('[data-testid="pelican-plan-cost-8"]').text()).toContain('pelicanTests.cost.partial')
+    expect(wrapper.get('[data-testid="pelican-result-cost-90"]').text()).toBe('$0.012345')
+    expect(wrapper.get('[data-testid="pelican-result-cost-89"]').text()).toBe('pelicanTests.cost.unknown')
+    expect(wrapper.get('[data-testid="pelican-result-cost-88"]').text()).toBe('$0.000000')
+    expect(wrapper.get('[data-testid="pelican-result-cost-87"]').text()).toBe('<$0.000001')
+    expect(wrapper.get('[data-testid="pelican-result-cost-86"]').text()).toContain('pelicanTests.cost.partial')
+  })
+
   it('lists the group tests with the account the scheduler picked', async () => {
     wrapper = mountView()
     await flushPromises()
@@ -123,14 +149,39 @@ describe('PelicanTestsView', () => {
     const save = wrapper.get('[data-testid="pelican-showcase-save"]')
     expect(save.attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid="pelican-showcase-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="pelican-showcase-api-enabled"]').setValue(false)
     await wrapper.get('[data-testid="pelican-showcase-max-items"]').setValue('40')
     await wrapper.get('[data-testid="pelican-showcase-auto-cleanup"]').setValue(false)
     expect(wrapper.find('[data-testid="pelican-showcase-retention-days"]').exists()).toBe(false)
     await wrapper.get('[data-testid="pelican-showcase-settings"] form').trigger('submit')
     await flushPromises()
-    expect(api.updateShowcaseSettings).toHaveBeenCalledWith({ enabled: true, max_items: 40, auto_cleanup: false, retention_days: 7 })
+    expect(api.updateShowcaseSettings).toHaveBeenCalledWith({ enabled: true, api_enabled: false, max_items: 40, auto_cleanup: false, retention_days: 7 })
     expect(fetchPublicSettings).toHaveBeenCalledWith(true)
     expect(wrapper.text()).toContain('pelicanTests.showcase.saved')
+  })
+
+  it('saves API access independently and reports the saved availability in its call information', async () => {
+    api.getShowcaseSettings.mockResolvedValue({ ...settings, enabled: true })
+    api.updateShowcaseSettings.mockImplementation(async (value) => value)
+    wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="pelican-showcase-api-enabled"]').setValue(false)
+    expect(wrapper.get('[data-testid="pelican-showcase-save"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="pelican-showcase-api-info"]').trigger('click')
+    expect(wrapper.get('[data-testid="api-info-dialog"]').attributes('data-enabled')).toBe('true')
+    await wrapper.get('[data-testid="pelican-showcase-settings"] form').trigger('submit')
+    await flushPromises()
+    expect(api.updateShowcaseSettings).toHaveBeenCalledWith({ ...settings, enabled: true, api_enabled: false })
+    expect(wrapper.get('[data-testid="api-info-dialog"]').attributes('data-enabled')).toBe('false')
+    expect(wrapper.get('[data-testid="pelican-showcase-enabled"]').element).toHaveProperty('checked', true)
+  })
+
+  it('shows that API output depends on opening the showcase to users', async () => {
+    wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="pelican-showcase-api-requires-gallery"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="pelican-showcase-enabled"]').setValue(true)
+    expect(wrapper.find('[data-testid="pelican-showcase-api-requires-gallery"]').exists()).toBe(false)
   })
 
   it('creates a group test on a preset schedule', async () => {
@@ -144,7 +195,7 @@ describe('PelicanTestsView', () => {
     expect(selects[0].findAll('option').map((option) => option.text())).toEqual(['GPT PRO号池 · OpenAI', 'Claude Max · Anthropic'])
     await selects[0].setValue('6')
     await editor.get('[data-testid="pelican-test-model"]').setValue('claude-opus-5-5')
-    await selects[2].setValue('0 * * * *')
+    await editor.get('[data-testid="pelican-test-schedule"]').setValue('0 * * * *')
     expect(editor.find('[data-testid="pelican-test-cron"]').exists()).toBe(false)
     await editor.trigger('submit')
     await flushPromises()
@@ -154,6 +205,24 @@ describe('PelicanTestsView', () => {
     }))
     expect(api.createPlan.mock.calls[0][0].prompt).toContain('鹈鹕')
     expect(wrapper.find('[data-testid="pelican-test-editor"]').exists()).toBe(false)
+  })
+
+  it('saves a random group rule without a custom prompt or result metadata', async () => {
+    api.createPlan.mockResolvedValue(plan())
+    wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="pelican-tests-create"]').trigger('click')
+    await flushPromises()
+    const editor = wrapper.get('[data-testid="pelican-test-editor"]')
+    await editor.findAll('select')[0].setValue('6')
+    await editor.get('[data-testid="pelican-test-model"]').setValue('fixture-model')
+    await editor.get('[data-testid="pelican-test-prompt"]').setValue('')
+    await editor.get('[data-testid="pelican-mode-select"]').setValue('random')
+    expect(editor.find('[data-testid="pelican-test-prompt"]').exists()).toBe(false)
+    await editor.trigger('submit')
+    await flushPromises()
+    expect(api.createPlan).toHaveBeenCalledWith(expect.objectContaining({ prompt_mode: 'random', prompt: '', model_id: 'fixture-model' }))
+    expect(api.createPlan.mock.calls[0][0]).not.toHaveProperty('pelican_question')
   })
 
   it('asks for the missing fields before creating', async () => {
@@ -205,7 +274,7 @@ describe('PelicanTestsView', () => {
     await flushPromises()
     expect(api.updatePlan).toHaveBeenCalledWith(7, {
       group_id: 4, model_id: 'gpt-6-astra', cron_expression: '*/30 * * * *', enabled: false,
-      prompt: 'draw a pelican', reasoning_effort: 'high', parallel_count: 2,
+      prompt: 'draw a pelican', prompt_mode: 'custom', reasoning_effort: 'high', parallel_count: 2,
     })
 
     api.updatePlan.mockClear()
@@ -271,7 +340,8 @@ describe('PelicanTestsView', () => {
     await flushPromises()
     wrapper.getComponent(Pagination).vm.$emit('update:page', 2)
     await flushPromises()
-    api.listResults.mockResolvedValue({ items: [result({ id: 91 })], total: 81 })
+    api.listResults.mockResolvedValue({ items: [result({ id: 91, cost_usd: 0.6 })], total: 81 })
+    api.listPlans.mockResolvedValue([plan({ today_cost_usd: 0.7, total_cost_usd: 1.2 })])
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
     expect(api.listResults).toHaveBeenLastCalledWith(2, 20, 0, expect.any(AbortSignal))
@@ -279,6 +349,9 @@ describe('PelicanTestsView', () => {
     expect(wrapper.findAll('[data-testid="pelican-test-history"] tbody tr')).toHaveLength(1)
     expect(wrapper.find('[data-testid="pelican-result-90"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="pelican-result-91"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="pelican-result-cost-91"]').text()).toBe('$0.600000')
+    expect(wrapper.get('[data-testid="pelican-plan-cost-7"]').text()).toContain('$0.700000')
+    expect(wrapper.get('[data-testid="pelican-plan-cost-7"]').text()).toContain('$1.200000')
   })
 
   it('ignores a late response from an earlier page and aborts it', async () => {

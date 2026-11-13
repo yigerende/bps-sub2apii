@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -18,6 +19,9 @@ func (s *OpenAIGatewayService) boundCodexTicket(req *http.Request, account *Acco
 }
 
 func (s *OpenAIGatewayService) boundCodexTicketFromHeader(ctx context.Context, h http.Header, account *Account) *openAICodexTicket {
+	if account != nil && (account.AuthConnectionID != "" || account.HasManagedOpenAIConnections()) {
+		return nil
+	}
 	if s == nil || h == nil || account == nil || !s.openAICodexTicketEnabledContext(ctx) {
 		return nil
 	}
@@ -124,7 +128,9 @@ func (s *OpenAIGatewayService) observeCodexTicketResponse(req *http.Request, res
 				route = returnedCookies
 			}
 			clean, _, err := codex780Route(route, current.Gateway, now)
-			acceptable = acceptable && err == nil
+			// Probe evidence belongs to the exact ticket and route pair. A
+			// business response cannot transfer it to unverified replacements.
+			acceptable = acceptable && err == nil && returned == sent && slices.Equal(clean, current.HarvestCookies)
 			returnedCookies = clean
 		}
 		if acceptable {

@@ -2,6 +2,23 @@
 
 This directory contains files for deploying bps-sub2api on Linux servers and Apple-silicon Macs.
 
+网页注册额度、登录失败封禁及可信代理升级要求见 [网页认证 IP 防护](AUTH_IP_GUARD.md)。
+
+## API Key 并发槽位 TTL 与升级切换
+
+`gateway.api_key_slot_ttl_seconds` 只调整共享 Redis 实现的普通 API Key active slots。默认 `0` 继承 `gateway.concurrency_slot_ttl_minutes`；保持默认值升级不会缩短原租约。显式值至少为 30 秒，120 秒可作为运维评估起点；30 秒下限是配置策略，未经过负载测量，不构成安全 SLA。account/user 槽位、Live 自身租约、WS ingress 租约及 regional concurrency authority 继续沿用各自期限。
+
+运行中的请求复用既有续租、watchdog 和精确释放流程。进程硬退出后，槽位在最后一次成功 Redis 更新时间加有效 TTL 后，由相关准入或统计访问清理，或随 Redis key 到期释放；重启不会立即清零。单独设置短 TTL 不能代替请求取消与退出确认。
+
+**共享同一 Redis 槽位命名空间的进程必须使用相同的有效 API Key TTL。首次启用短 TTL、修改有效 TTL、回退配置或回滚到不识别该字段的旧二进制时，都必须统一 drain，禁止长短 TTL 实例混跑。** 准入和统计读取会按调用进程的 TTL 裁剪成员；短 TTL 进程可能把仍按长周期续租的活跃请求误判为到期，提前重新授予容量。
+
+1. 保存当前二进制与配置，记录旧、新有效 TTL，以及共享该槽位命名空间的全部实例。配置为 `0` 时，也要计入继承的分钟值；regional authority 不应用这个独立 TTL。
+2. 从负载均衡和其他入口撤下全部旧 TTL 实例，停止接收新请求，等待已有 HTTP/SSE、WebSocket turn 和相关 Live 会话正常结束。确认实际转发及槽位所有权已结束后再停止旧实例；达到 drain 超时或进程退出，本身不能证明上游请求已停止。
+3. 确认旧 TTL 进程及其相关统计读取已全部停止，再以统一的新有效 TTL 启动实例并恢复流量。不得逐个滚动切换不同 TTL 的实例，也不得通过清 Redis、删除其他进程成员或启动清理扫描替代 drain。
+4. 核对实际加载的配置、服务日志、并发统计及请求路径。回滚执行同一套 drain；旧二进制忽略专用字段后会恢复共享 TTL，不能直接与短 TTL 实例并行运行。
+
+新增回归覆盖默认继承、独立 TTL、失效回收、双客户端活跃成员、队列和 Live handoff，以及 account/user 与 regional 隔离。实际负载、多 Pod drain 和生产切换仍需在各自环境验收；测试通过不代表这些操作已验证。
+
 ## Deployment Methods
 
 | Method | Best For | Setup Wizard |
@@ -9,6 +26,7 @@ This directory contains files for deploying bps-sub2api on Linux servers and App
 | **Docker Compose** | Quick setup, all-in-one | Not needed (auto-setup) |
 | **Apple container** | Native local stack on macOS 26 | Not needed (auto-setup) |
 | **Binary Install** | Production servers, systemd | Web-based wizard |
+| **[Kubernetes / K3s](kubernetes/README.md)** | Request replicas with a shared primary | Pre-provisioned config / Secrets |
 
 ## Files
 
@@ -22,6 +40,7 @@ This directory contains files for deploying bps-sub2api on Linux servers and App
 | `.env.example` | Container environment variables template |
 | `DOCKER.md` | Docker Hub documentation |
 | `install.sh` | One-click binary installation script |
+| `migrate-reauth-managed.py` | 将旧登录 Worker 迁入随主程序版本自动升级的内置管理器，见 [迁移说明](MANAGED_WORKER.md) |
 | `install-datamanagementd.sh` | datamanagementd 一键安装脚本 |
 | `bps-sub2api.service` | Systemd service unit file |
 | `bps-sub2api-datamanagementd.service` | datamanagementd systemd service unit file |
@@ -82,8 +101,8 @@ docker compose -f docker-compose.local.yml up -d
 # View logs
 docker compose -f docker-compose.local.yml logs -f bps-sub2api
 
-# If admin password was auto-generated, find it in logs:
-docker compose -f docker-compose.local.yml logs bps-sub2api | grep "admin password"
+# If admin email/password were auto-generated, find them in logs:
+docker compose -f docker-compose.local.yml logs bps-sub2api | grep "Generated admin"
 
 # Access Web UI
 # http://localhost:8082
@@ -115,7 +134,7 @@ mkdir -p bps-sub2api-data bps-sub2api-postgres-data bps-sub2api-redis-data
 # Start all services using local directory version
 docker compose -f docker-compose.local.yml up -d
 
-# View logs (check for auto-generated admin password)
+# View logs (check for auto-generated admin email and password)
 docker compose -f docker-compose.local.yml logs -f bps-sub2api
 
 # Access Web UI
@@ -131,6 +150,20 @@ docker compose -f docker-compose.local.yml logs -f bps-sub2api
 
 **Recommendation:** Use `docker-compose.local.yml` (deployed by `docker-deploy.sh`) for easier data management and migration.
 
+### Docker behind host Nginx: trusted client IPs
+
+Registration quotas and authentication abuse protection always use the trusted
+proxy chain. With host Nginx and a Docker published port, the application's TCP
+peer may be a bridge gateway, which is not trusted by default. Configure only
+the actual proxy IPs through `SERVER_TRUSTED_PROXIES` in `.env` or the persistent
+`/app/data/config.yaml`. Leave the environment variable **unset**, not empty, to
+keep YAML configuration. Updating `.env` alone has no effect with an older
+Compose template that does not pass this variable through.
+
+See [Docker + host Nginx trusted proxy configuration](../docs/docker-trusted-proxies.md)
+for peer inspection, exact proxy configuration, application-only recreation,
+registration IP diagnostics and preserving site settings across template updates.
+
 ### How Auto-Setup Works
 
 When using Docker Compose with `AUTO_SETUP=true`:
@@ -139,14 +172,14 @@ When using Docker Compose with `AUTO_SETUP=true`:
    - Connects to PostgreSQL and Redis
    - Applies database migrations (SQL files in `backend/migrations/*.sql`) and records them in `schema_migrations`
    - Generates JWT secret (if not provided)
-   - Creates admin account (password auto-generated if not provided)
+   - Creates admin account (email and password auto-generated if not provided; a provided password must be 8-72 bytes)
    - Writes config.yaml
 
 2. No manual Setup Wizard needed - just configure `.env` and start
 
-3. If `ADMIN_PASSWORD` is not set, check logs for the generated password:
+3. If `ADMIN_EMAIL` / `ADMIN_PASSWORD` are not set, check logs for the generated admin email (login username) and password:
    ```bash
-   docker compose logs bps-sub2api | grep "admin password"
+   docker compose logs bps-sub2api | grep "Generated admin"
    ```
 
 ### Startup and Database Recovery
@@ -260,14 +293,16 @@ docker compose down -v
 | `JWT_SECRET` | **Recommended** | *(auto-generated)* | JWT secret (fixed for persistent sessions) |
 | `TOTP_ENCRYPTION_KEY` | **Recommended** | *(auto-generated)* | TOTP encryption key (fixed for persistent 2FA) |
 | `SERVER_PORT` | No | `8082` | Server port |
-| `ADMIN_EMAIL` | No | `admin@bps-sub2api.local` | Admin email |
-| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password |
+| `ADMIN_EMAIL` | No | *(auto-generated)* | Admin email (login username) |
+| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password (8-72 bytes) |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
 | `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_CLIENT_SECRET` | No | *(builtin)* | Google OAuth client secret (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_SCOPES` | No | *(default)* | OAuth scopes (Gemini OAuth) |
 | `GEMINI_QUOTA_POLICY` | No | *(empty)* | JSON overrides for Gemini local quota simulation (Code Assist only). |
+| `GATEWAY_API_KEY_QUEUE_MAX_WAITING` | No | `5` | Extra waiting requests per API key with `concurrency_limit>0`; `0` disables key queueing and restores immediate `429`. Read at process start; recreate the container after changing. |
+| `GATEWAY_API_KEY_QUEUE_TIMEOUT_SECONDS` | No | `30` | Per-request wait budget in seconds for key capacity; must be a positive integer. Read at process start; recreate the container after changing. |
 
 See `.env.example` for all available options.
 
@@ -545,11 +580,15 @@ If you need to use AI Studio OAuth for Gemini accounts, add the OAuth client cre
 
 The main config file is at `/etc/bps-sub2api/config.yaml` (created by Setup Wizard).
 
+Login rate limiting can be toggled in **System Settings → Security → Login rate limiting** (enabled by default). Saving applies immediately to admins and users, including password, two-factor, Passkey, and OAuth account-binding sign-ins. Disabling skips both the request counter and the IP failure guard, including existing bans and Redis/Lua failures on these login paths. Other authentication endpoints retain their protection. Existing counters and bans keep their original expiry and apply again if re-enabled before expiry. The setting is stored as `login_rate_limit_enabled` in the database; no `.env` change or restart is required. An older settings client that omits this field preserves the current value.
+
+The independent **System Settings → Security → Registration account limit per IP** switch defaults to enabled (at most two registered accounts per IP, including email and OAuth signups). Administrators can disable it for shared/NAT networks without disabling CAPTCHA, email verification, request throttling or login abuse protection. Saving `registration_ip_limit_enabled` takes effect on the next auth request without a restart. Missing/invalid values and lookup failures retain the quota; older settings clients that omit the field preserve its current value. This uses the existing settings store and requires no schema migration. Existing IP quota rows are never deleted or reset. Signups while disabled do not increment the quota, and re-enabling resumes the previously retained counts rather than backfilling those signups. Disabling the quota can increase signup abuse, so retain other verification controls. Reverting to a binary without this switch restores the original always-on quota.
+
 ### Prerequisites
 
 - Linux server (Ubuntu 20.04+, Debian 11+, CentOS 8+, etc.)
 - PostgreSQL 14+
-- Redis 6+
+- Redis 6.0+
 - systemd
 
 ### Directory Structure

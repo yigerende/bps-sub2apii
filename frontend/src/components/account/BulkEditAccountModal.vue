@@ -6,6 +6,7 @@
     @close="handleClose"
   >
     <form id="bulk-edit-account-form" class="space-y-5" @submit.prevent="() => handleSubmit()">
+      <AccountUpstreamChannelBinding v-if="show" :account-ids="targetMode === 'selected' ? targetAccountIds : []" />
       <!-- Info -->
       <div class="rounded-lg bg-blue-50 p-4 dark:bg-blue-900/20">
         <p class="text-sm text-blue-700 dark:text-blue-400">
@@ -17,7 +18,7 @@
               d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
-          {{ t('admin.accounts.bulkEdit.selectionInfo', { count: targetMode === 'filtered' ? targetPreviewCount : accountIds.length }) }}
+          {{ t('admin.accounts.bulkEdit.selectionInfo', { count: targetMode === 'filtered' ? targetPreviewCount : targetAccountIds.length }) }}
         </p>
       </div>
 
@@ -32,7 +33,7 @@
       </div>
 
       <!-- Excel / BPS protocol (ChatGPT OAuth only) -->
-      <div v-if="allOpenAIOAuthOnly" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAIOAuthOnly && globalBpsEnabled" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label id="bulk-edit-excel-bps-label" class="input-label mb-0" for="bulk-edit-excel-bps-enabled">
@@ -49,12 +50,9 @@
         <fieldset id="bulk-edit-excel-bps-body" :disabled="!enableExcelBPS"
           :class="!enableExcelBPS && 'pointer-events-none opacity-50'"
           aria-labelledby="bulk-edit-excel-bps-label">
-          <button type="button" role="switch" :aria-checked="excelBPSEnabled"
-            :aria-label="t('admin.accounts.openai.excelBPS')" data-testid="bulk-excel-bps-toggle"
-            @click="excelBPSEnabled = !excelBPSEnabled"
-            :class="['relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2', excelBPSEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600']">
-            <span :class="['pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition', excelBPSEnabled ? 'translate-x-5' : 'translate-x-0']" />
-          </button>
+          <ExcelBPSModeSwitches :enabled="excelBPSEnabled" :mode="excelBPSMode"
+            :loading="bpsDefaults.loading.value" :failed="bpsDefaults.failed.value" :applied="bpsDefaults.applied.value"
+            :available="!authStore.isObserver" prefix="bulk-excel-bps" @toggle="bpsDefaults.toggle" />
           <div v-if="excelBPSEnabled" class="mt-3 space-y-3">
             <label class="flex items-center gap-2 text-sm">
               <input v-model="excelBPSAllModels" type="checkbox" data-testid="bulk-excel-bps-all-models" />
@@ -76,15 +74,6 @@
                 <span class="text-sm">{{ t('admin.accounts.openai.excelBPSOmitUnsupportedTools') }}</span>
               </label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.excelBPSOmitUnsupportedToolsDesc') }}</p>
-            </div>
-            <div class="mt-3">
-              <label class="flex items-center gap-2">
-                <input v-model="excelBPSIgnoreImages" type="checkbox"
-                  data-testid="bulk-excel-bps-ignore-images"
-                  class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-500" />
-                <span class="text-sm">{{ t('admin.accounts.openai.excelBPSIgnoreImages') }}</span>
-              </label>
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.excelBPSIgnoreImagesDesc') }}</p>
             </div>
             <div class="mt-3">
               <label class="flex items-center gap-2">
@@ -377,6 +366,12 @@
         </p>
       </div>
 
+      <div v-if="allOpenAIOAuthOnly" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="flex items-center gap-2 text-sm"><input v-model="enableOpenAIModelAliases" type="checkbox" data-testid="enable-model-aliases" />{{ t('priorityScheduling.changeModelScope') }}</label>
+        <label class="mt-3 flex items-center gap-2 text-sm"><input v-model="openaiModelAliases" :disabled="!enableOpenAIModelAliases" type="checkbox" data-testid="bulk-model-aliases" />{{ t('priorityScheduling.modelAliases') }}</label>
+        <p class="input-hint">{{ t('priorityScheduling.bulkModelAliasesHint') }}</p>
+      </div>
+
       <!-- Model restriction -->
       <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -489,6 +484,7 @@
 
               <ModelWhitelistSelector
                 v-model="allowedModels"
+                :model-mappings="modelMappings"
                 :platforms="targetSelectedPlatforms"
               />
 
@@ -974,6 +970,14 @@
             <Icon name="exclamationTriangle" size="xs" class="mt-0.5 flex-shrink-0" />
             <span>{{ t('admin.accounts.bulkEdit.rateSyncWarning') }}</span>
           </p>
+        </div>
+        <div>
+          <div class="mb-3 flex items-center justify-between">
+            <label class="input-label mb-0" for="bulk-edit-cost-multiplier-enabled">{{ t('admin.accounts.costMultiplier') }}</label>
+            <input id="bulk-edit-cost-multiplier-enabled" v-model="enableCostMultiplier" type="checkbox" aria-controls="bulk-edit-cost-multiplier" class="rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+          </div>
+          <input id="bulk-edit-cost-multiplier" v-model.number="costMultiplier" type="number" min="0" max="1000000" step="0.001" required :disabled="!enableCostMultiplier" :aria-label="t('admin.accounts.costMultiplier')" class="input" :class="!enableCostMultiplier && 'cursor-not-allowed opacity-50'" />
+          <p class="input-hint">{{ t('admin.accounts.costMultiplierHint') }}</p>
         </div>
       </div>
 
@@ -1559,8 +1563,13 @@
 </template>
 
 <script setup lang="ts">
+import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
+
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ExcelBPSModeSwitches from './ExcelBPSModeSwitches.vue'
+import type { ExcelBPSMode } from '@/utils/excelBPSDefaults'
+import { useExcelBPSDefaults } from '@/composables/useExcelBPSDefaults'
 import { DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, MAX_BPS_RECOVERY_INTERVAL_MINUTES, isValidBPSRecoveryInterval, bpsRecoveryIntervalOrDefault } from '@/utils/excelBPSRecovery'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -1576,6 +1585,7 @@ import type {
   OpenAIResponsesMode
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import AccountUpstreamChannelBinding from './AccountUpstreamChannelBinding.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
@@ -1614,6 +1624,7 @@ interface Props {
   selectedTypes: AccountType[]
   target?: {
     mode: 'selected' | 'filtered'
+    accountIds?: number[]
     filters?: Record<string, unknown>
     previewCount?: number
     selectedPlatforms?: AccountPlatform[]
@@ -1632,9 +1643,13 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const appStore = useAppStore()
 const authStore = useAuthStore()
+const globalBpsEnabled = computed(() => appStore.cachedPublicSettings?.excel_bps_enabled !== false)
 
 // Platform awareness
 const targetMode = computed(() => props.target?.mode ?? 'selected')
+const targetAccountIds = computed(() => props.target?.mode === 'selected'
+  ? props.target.accountIds ?? props.accountIds
+  : props.accountIds)
 const targetPreviewCount = computed(() => props.target?.previewCount ?? props.accountIds.length)
 const targetSelectedPlatforms = computed(() => props.target?.selectedPlatforms ?? props.selectedPlatforms)
 const targetSelectedTypes = computed(() => props.target?.selectedTypes ?? props.selectedTypes)
@@ -1739,6 +1754,8 @@ interface ModelMapping {
 // State - field enable flags
 const enableBaseUrl = ref(false)
 const enableModelRestriction = ref(false)
+const enableOpenAIModelAliases = ref(false)
+const openaiModelAliases = ref(true)
 const enableCustomErrorCodes = ref(false)
 const enableInterceptWarmup = ref(false)
 const enableHeaderOverride = ref(false)
@@ -1746,6 +1763,8 @@ const enableProxy = ref(false)
 const enableConcurrency = ref(false)
 const enableLoadFactor = ref(false)
 const enablePriority = ref(false)
+const enableCostMultiplier = ref(false)
+const costMultiplier = ref(DEFAULT_ACCOUNT_COST_MULTIPLIER)
 const enableRateMultiplier = ref(false)
 const enableGroupRateMultiplier = ref(false)
 const groupRateMultiplier = ref(1)
@@ -1788,6 +1807,7 @@ const rateMultiplier = ref(1)
 const status = ref<'active' | 'inactive'>('active')
 const groupIds = ref<number[]>([])
 const excelBPSEnabled = ref(false)
+const excelBPSMode = ref<ExcelBPSMode>('initial')
 const excelBPSAllModels = ref(false)
 const excelBPSModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
 const excelBPSMihomo = ref(false)
@@ -1797,10 +1817,26 @@ const excelBPSAutoDisableOn403 = ref(false)
 const excelBPSAutoRecoverOn403 = ref(false)
 const excelBPSRecoveryIntervalMinutes = ref<number | string>(DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES)
 const excelBPSOmitUnsupportedTools = ref(false)
-const excelBPSIgnoreImages = ref(false)
 const excelBPSIgnoreEncryptedContent = ref(false)
 const excelBPSAutoMoveOn403 = ref(false)
 const excelBPS403TargetGroupID = ref<number | string>('')
+const bpsDefaults = useExcelBPSDefaults({
+  enabled: excelBPSEnabled,
+  mode: excelBPSMode,
+  available: () => !authStore.isObserver,
+  context: () => JSON.stringify([props.show, props.accountIds, props.selectedPlatforms, props.selectedTypes, authStore.user?.id, authStore.isObserver]),
+  fields: {
+    all_models: excelBPSAllModels, models: excelBPSModels,
+    omit_unsupported_tools: excelBPSOmitUnsupportedTools,
+    ignore_encrypted_content: excelBPSIgnoreEncryptedContent,
+    auto_disable_on_403: excelBPSAutoDisableOn403, auto_recover_on_403: excelBPSAutoRecoverOn403,
+    recovery_interval_minutes: excelBPSRecoveryIntervalMinutes,
+    auto_move_on_403: excelBPSAutoMoveOn403, target_group_id: excelBPS403TargetGroupID,
+    session_proxy: excelBPSMihomo, proxy_source: excelBPSProxySource,
+    cache_creation_as_input: excelBPSCacheCreationAsInput
+  }
+})
+
 const excelBPS403GroupOptions = computed(() => [
   { value: '', label: t('admin.accounts.openai.excelBPS403SelectTarget') },
   { value: 0, label: t('admin.accounts.openai.excelBPS403LeaveAllGroups') },
@@ -2072,6 +2108,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.priority = priority.value
   }
 
+  if (enableCostMultiplier.value) {
+    ensureExtra().cost_multiplier = costMultiplier.value
+  }
+
   if (enableRateMultiplier.value) {
     updates.rate_multiplier = rateMultiplier.value
   }
@@ -2098,6 +2138,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   if (enableExcelBPS.value && allOpenAIOAuthOnly.value) {
     const extra = ensureExtra()
     extra.openai_excel_bps = excelBPSEnabled.value
+    extra.openai_excel_bps_config_mode = excelBPSEnabled.value ? excelBPSMode.value : null
     // null explicitly removes an existing model scope; [] selects no BPS models.
     extra.openai_excel_bps_models = excelBPSEnabled.value && !excelBPSAllModels.value
       ? [...new Set(excelBPSModels.value.map(model => model.trim()).filter(Boolean))]
@@ -2112,7 +2153,6 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.openai_excel_bps_auto_recover_on_403 = excelBPSEnabled.value && excelBPSAutoDisableOn403.value && excelBPSAutoRecoverOn403.value
     extra.openai_excel_bps_403_recovery_interval_minutes = bpsRecoveryIntervalOrDefault(excelBPSRecoveryIntervalMinutes.value)
     extra.openai_excel_bps_omit_unsupported_tools = excelBPSEnabled.value && excelBPSOmitUnsupportedTools.value
-    extra.openai_excel_bps_ignore_images = excelBPSEnabled.value && excelBPSIgnoreImages.value
     extra.openai_excel_bps_ignore_encrypted_content = excelBPSEnabled.value && excelBPSIgnoreEncryptedContent.value
     extra.openai_excel_bps_auto_move_on_403 = excelBPSEnabled.value && excelBPSAutoMoveOn403.value
     extra.openai_excel_bps_403_target_group_id = excelBPSEnabled.value && excelBPSAutoMoveOn403.value
@@ -2175,6 +2215,11 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
       credentials.model_mapping = modelMapping ?? {}
       credentialsChanged = true
     }
+  }
+
+  if (enableOpenAIModelAliases.value && allOpenAIOAuthOnly.value) {
+    credentials.model_mapping_mode = openaiModelAliases.value ? 'aliases' : 'whitelist'
+    credentialsChanged = true
   }
 
   if (enableCustomErrorCodes.value) {
@@ -2332,7 +2377,8 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
 }
 
 const handleSubmit = async () => {
-  if (targetMode.value === 'selected' && props.accountIds.length === 0) {
+  if (bpsDefaults.loading.value) return
+  if (targetMode.value === 'selected' && targetAccountIds.value.length === 0) {
     appStore.showError(t('admin.accounts.bulkEdit.noSelection'))
     return
   }
@@ -2346,6 +2392,7 @@ const handleSubmit = async () => {
     (enableOpenAIEndpointCapabilities.value && allOpenAIAPIKey.value) ||
     (enableOpenAIResponsesMode.value && allOpenAIAPIKey.value) ||
     enableModelRestriction.value ||
+    (enableOpenAIModelAliases.value && allOpenAIOAuthOnly.value) ||
     enableCustomErrorCodes.value ||
     enableInterceptWarmup.value ||
     enableHeaderOverride.value ||
@@ -2353,6 +2400,7 @@ const handleSubmit = async () => {
     enableConcurrency.value ||
     enableLoadFactor.value ||
     enablePriority.value ||
+    enableCostMultiplier.value ||
     enableRateMultiplier.value ||
     enableGroupRateMultiplier.value ||
     enableStatus.value ||
@@ -2410,6 +2458,11 @@ const handleSubmit = async () => {
     }
   }
 
+  if (enableCostMultiplier.value && !isValidAccountCostMultiplier(costMultiplier.value)) {
+    appStore.showError(t('admin.accounts.costMultiplierInvalid'))
+    return
+  }
+
   const built = buildUpdatePayload()
   if (!built) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
@@ -2436,7 +2489,7 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
         filters: props.target.filters,
         ...updates
       })
-      : await adminAPI.accounts.bulkUpdate(props.accountIds, updates)
+      : await adminAPI.accounts.bulkUpdate([...targetAccountIds.value], updates)
     const success = res.success || 0
     const failed = res.failed || 0
     const inherited = res.long_context_inherited_count || 0
@@ -2506,6 +2559,8 @@ watch(
       // Reset all enable flags
       enableBaseUrl.value = false
       enableModelRestriction.value = false
+      enableOpenAIModelAliases.value = false
+      openaiModelAliases.value = true
       enableCustomErrorCodes.value = false
       enableInterceptWarmup.value = false
       enableHeaderOverride.value = false
@@ -2513,6 +2568,8 @@ watch(
       enableConcurrency.value = false
       enableLoadFactor.value = false
       enablePriority.value = false
+      enableCostMultiplier.value = false
+      costMultiplier.value = DEFAULT_ACCOUNT_COST_MULTIPLIER
       enableRateMultiplier.value = false
       enableStatus.value = false
       enableGroups.value = false
@@ -2536,6 +2593,7 @@ watch(
       // Reset all values
       baseUrl.value = ''
       excelBPSEnabled.value = false
+      excelBPSMode.value = 'initial'
       excelBPSAllModels.value = false
       excelBPSModels.value = [...DEFAULT_EXCEL_BPS_MODELS]
       excelBPSMihomo.value = false
@@ -2545,7 +2603,6 @@ watch(
       excelBPSAutoRecoverOn403.value = false
       excelBPSRecoveryIntervalMinutes.value = DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES
       excelBPSOmitUnsupportedTools.value = false
-      excelBPSIgnoreImages.value = false
       excelBPSIgnoreEncryptedContent.value = false
       excelBPSAutoMoveOn403.value = false
       excelBPS403TargetGroupID.value = ''
